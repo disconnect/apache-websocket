@@ -1,0 +1,42 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html>
+  <head>
+    <title>WebSocket Echo</title>
+    <script type="text/javascript">
+    <!--
+      var ws;
+
+      function init() {
+        ws = new WebSocket("ws://localhost/echo");
+        ws.onopen = function(event) {
+          document.getElementById("main").style.visibility = "visible";
+          document.getElementById("connected").innerText = "Connected to WebSocket server";
+        };
+        ws.onmessage = function(event) {
+          document.getElementById("output").innerText = event.data;
+        };
+        ws.onerror = function(event) { alert("Received error"); };
+        ws.onclose = function(event) {
+          ws = null;
+          document.getElementById("main").style.visibility = "hidden";
+          document.getElementById("connected").innerText = "Connected Closed";
+        }
+      }
+
+      function send(message) {
+        if (ws) {
+          ws.send(message);
+        }
+      }
+    // -->
+    </script>
+  </head>
+  <body onload="init();">
+    <h1>WebSocket Echo</h1>
+    <div id="connected">Not Connected</div>
+    <div id="main" style="visibility:hidden">
+    Enter Message: <input type="text" name="message" value="" size="80" onChange="send(this.value)"/><br/>
+    Server says... <div id="output"/>
+    </div>
+  </body>
+</html>
