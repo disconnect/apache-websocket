@@ -33,6 +33,9 @@
 
 #include "websocket_plugin.h"
 
+#define CORE_PRIVATE
+#include "http_connection.h"
+
 module AP_MODULE_DECLARE_DATA websocket_module;
 
 typedef struct {
@@ -131,24 +134,76 @@ static const char *mod_websocket_conf_handler(cmd_parms *cmd, void *confv, const
 typedef struct _WebSocketState {
   request_rec *r;
   apr_bucket_brigade *obb;
+  int closing;
 } WebSocketState;
 
 static size_t mod_websocket_plugin_send(const struct _WebSocketServer *server, const int type, const unsigned char *buffer, const size_t buffer_size)
 {
   size_t written = 0;
 
-  if ((server != NULL) && (server->state != NULL) && (type == 0)) { /* Only support type 0 (UTF-8) for now */
+  if ((server != NULL) && (server->state != NULL)) {
     WebSocketState *ws_state = (WebSocketState *) server->state;
 
-    if ((ws_state->r != NULL) && (ws_state->obb != NULL)) {
+    if ((ws_state->r != NULL) && (ws_state->obb != NULL) && !ws_state->closing) {
       ap_filter_t *of = ws_state->r->connection->output_filters;
-      const char header = '\0', trailer = '\xFF';
+      const char header = (char)type;
 
       ap_fwrite(of, ws_state->obb, &header, 1);
-      ap_fwrite(of, ws_state->obb, (const char *)buffer, buffer_size);
-      ap_fwrite(of, ws_state->obb, &trailer, 1);
+      if (type >= 0x80) {
+        /* Binary data */
+        char length[16], tmp;
+        size_t buffer_length = (buffer != NULL) ? buffer_size : 0;
+        int n = 0, half, i;
+
+        /* Fill in the length bytes (in reverse order) */
+        do {
+          /*
+           * Turn on the high-order bit for each byte in the length sequence
+           * (we will turn it off for the last byte later)
+           */
+          length[n++] = (buffer_length & 0x7F) | 0x80;
+          buffer_length >>= 7;
+        } while (buffer_length != 0);
+
+        /*
+         * Turn off the high-order bit for the last byte in the length sequence
+         * (which is actually the first, as the bytes are reversed)
+         */
+        length[0] &= 0x7F;
+
+        /* Since we filled in the length bytes backwards, reverse them */
+        half = n >> 1;
+        for (i = 0; i < half; i++) {
+          tmp = length[i];
+          length[i] = length[n - i - 1];
+          length[n - i - 1] = tmp;
+        }
+
+        /* Write the /length/ bytes */
+        ap_fwrite(of, ws_state->obb, length, n);
+
+        if ((buffer != NULL) && (buffer_size > 0)) {
+          /* If we have /data/, write it */
+          ap_fwrite(of, ws_state->obb, (const char *)buffer, buffer_size);
+          written = buffer_size;
+        }
+
+        if ((type == 0xFF) && (buffer == NULL) && (buffer_size == 0)) {
+          /* Special case for closing the connection */
+          ws_state->closing = 1;
+        }
+      } else {
+        /* Text data */
+        const char trailer = '\xFF';
+
+        if (buffer != NULL) {
+          /* If we have /data/, write it */
+          ap_fwrite(of, ws_state->obb, (const char *)buffer, buffer_size);
+          written = buffer_size;
+        }
+        ap_fwrite(of, ws_state->obb, &trailer, 1);
+      }
       ap_fflush(of, ws_state->obb);
-      written = buffer_size;
     }
   }
   return written;
@@ -159,7 +214,17 @@ static void mod_websocket_plugin_close(const WebSocketServer *server)
   if ((server != NULL) && (server->state != NULL)) {
     WebSocketState *ws_state = (WebSocketState *) server->state;
 
-    ws_state->r->connection->keepalive = AP_CONN_CLOSE; /* Is this right? -- FIXME */
+    /* send closing handshake */
+    mod_websocket_plugin_send(server, 0xFF, NULL, 0);
+
+    /*
+     * The clients -- at least Chrome and Safari (with latest WebKit) -- do not
+     * respond to the "terminate the WebSocket connection" byte sequence of
+     * 0xFF 0x00. Instead, just close the connection.
+     */
+    ws_state->r->connection->keepalive = AP_CONN_CLOSE;
+
+    ap_lingering_close(ws_state->r->connection); /* Is there a better way? -- FIXME */
   }
 }
 
@@ -308,7 +373,7 @@ static int mod_websocket_method_handler(request_rec *r)
 
             if (!mod_websocket_handshake(sec_websocket_key1, sec_websocket_key2, sec_websocket_key3, response)) {
               websocket_config_rec *conf = (websocket_config_rec *) ap_get_module_config(r->per_dir_config, &websocket_module);
-              WebSocketState server_state = {r, NULL};
+              WebSocketState server_state = {r, NULL, 0};
               WebSocketServer server = {
                 sizeof(WebSocketServer), 1, &server_state, mod_websocket_plugin_send, mod_websocket_plugin_close
               };
@@ -422,29 +487,23 @@ static int mod_websocket_method_handler(request_rec *r)
                           }
                           break;
                         case DATA_FRAMING_IN_BINARY_DATA:
-#if 0
-                          if (type >= 0x80) {
-                            /* FIXME */
-                            conf->plugin->on_message(plugin_private, &server, type,
-                                &block[block_data_offset + 1], block_offset - block_data_offset - 1);
-                            type = -1;
-                          }
-#endif
+                          /* Handle binary data frames -- FIXME */
                           state = DATA_FRAMING_CLOSE;
                           break;
                         case DATA_FRAMING_IN_BINARY_LENGTH:
-                          if ((block[block_offset] & 0x80) == 0x80) {
+                          data_length = data_length*128 + (block[block_offset] & 0x7F);
+
+                          if ((block[block_offset] & 0x80) == 0) {
                             /* Encountered end-of-length marker */
-                            state = (data_length == 0) ? DATA_FRAMING_READ_TYPE : DATA_FRAMING_IN_BINARY_DATA;
-                          } else {
-                            data_length = data_length*128 + (block[block_offset] & 0x7F);
-                            if ((data_length == 0) && (type == 0xFF)) {
-                              /* /type/ is 0xFF, and /length/ is 0 */
-                              state = DATA_FRAMING_CLOSE;
-                            } else if (data_length > data_limit) {
-                              /* Exceeded implementation-specific limit */
-                              state = DATA_FRAMING_CLOSE;
+                            if (data_length == 0) {
+                              state = (type == 0xFF) ? DATA_FRAMING_CLOSE : DATA_FRAMING_READ_TYPE;
+                            } else {
+                              state = DATA_FRAMING_IN_BINARY_DATA;
                             }
+                          }
+                          if (data_length > data_limit) {
+                            /* Exceeded implementation-specific limit */
+                            state = DATA_FRAMING_CLOSE;
                           }
                           block_offset++;
                           break;
