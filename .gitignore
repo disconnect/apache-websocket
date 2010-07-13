@@ -1,5 +1,11 @@
 .DS_Store
 .*.swp
 .sconsign.dblite
+.libs
+*.la
+*.lo
+*.o
+*.obj
 *.os
+*.slo
 *.so

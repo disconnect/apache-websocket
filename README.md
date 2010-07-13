@@ -5,24 +5,39 @@ requests using the WebSocket protocol. The module consists of a plugin
 architecture for handling WebSocket messaging. Doing so does not require any
 knowledge of internal Apache structures.
 
-This implementation does not support the older draft-75 protocol. The code
-should be easy enough to modify to temporarily support the older protocol.
+This implementation supports draft-76 of the WebSocket protocol. It does not
+support the older draft-75 protocol. The code should be easy enough to modify
+to support the older protocol. Make sure that your client supports the
+appropriate protocol. The Stable and Beta channels of Chrome, and the release
+version of Safari, do not yet implement the draft-76 protocol. The Dev channel
+of Chrome and the nightly WebKit builds (which may be used with Safari) do
+support it, however.
 
 ## Download
 
     $ git clone git://github.com/disconnect/apache-websocket.git
 
-## Build
+## Building and Installation
 
-SCons is used to build the module. In addition, it is currently only configured
-to build under Mac OS X. It should work be trivial to add support for Linux,
-while it should not be too hard to support Windows.
+SCons may be used to build the module. However, it is currently only configured
+to build under Mac OS X.
 
     $ scons
-
-## Installation
-
     $ sudo scons install
+
+Alternatively, you may use <code>apxs</code> to build and install the module.
+Under Linux (at least under Ubuntu 10.04 LTS), use:
+
+    $ sudo apxs2 -i -a -c mod_websocket.c
+
+You probably only want to use the <code>-a</code> option the first time you
+issue the command, as it will overwrite your configuration each time you
+execute it (see below).
+
+You may use <code>apxs</code> under Mac OS X as well if you do not want to use
+SCons. In that case, use:
+
+    $ sudo apxs -i -a -c mod_websocket.c
 
 ## Plugins
 
@@ -39,7 +54,14 @@ various functions that will service the requests. The only required function is
 the <code>on_message</code> function for handling incoming messages.
 
 See <code>examples/echo.c</code> for an example implementation of an "echo"
-plugin.
+plugin. A sample <code>client.html</code> is included as well. If you try it
+and you get a message that says Connection Closed, you are most likely using a
+client that does not support draft-76 of the protocol.
+
+Since the plugins do not depend on Apache, you do not need to use
+<code>apxs</code> to build them. Also, it does not need to be placed in the same
+directory as the WebSocket module. You may use SCons (or some other build
+system) to be build and install the plugins.
 
 ## Configuration
 
@@ -57,7 +79,7 @@ are used to handle the WebSocket plugin requests directed at
 <code>/echo</code>. The server will initialize the module by calling the
 <code>echo_init</code> function in <code>mod_websocket_echo.so</code>:
 
-    LoadModule websocket_module libexec/apache2/mod_websocket.so
+    LoadModule websocket_module   libexec/apache2/mod_websocket.so
 
     <IfModule mod_websocket.c>
       <Location /echo>
@@ -66,11 +88,26 @@ are used to handle the WebSocket plugin requests directed at
       </Location>
     </IfModule>
 
+Under Linux, the module-specific configuration may be contained in a single
+file called <code>/etc/apache2/mods-available/websocket.load</code> (your
+version of Linux may vary). Since the directory containing the module is
+different from Mac OS X, it may look more like this:
+
+    LoadModule websocket_module   /usr/lib/apache2/modules/mod_websocket.so
+
+    <IfModule mod_websocket.c>
+      <Location /echo>
+        SetHandler websocket-handler
+        WebSocketHandler /usr/lib/apache2/modules/mod_websocket_echo.so echo_init
+      </Location>
+    </IfModule>
+
+This is the configuration that may be overwritten when the <code>-a</code>
+option is included using <code>axps2</code>, so be careful.
+
 ## Authors
 
 * The original code was written by <code>self.disconnect</code>.
-
-Contributors are more than welcome to join the project.
 
 ## License
 
