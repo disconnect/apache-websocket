@@ -39,6 +39,7 @@
 module AP_MODULE_DECLARE_DATA websocket_module;
 
 typedef struct {
+  int support_draft75;
   char *location;
   apr_dso_handle_t *res_handle;
   WebSocketPlugin *plugin;
@@ -135,6 +136,7 @@ typedef struct _WebSocketState {
   request_rec *r;
   apr_bucket_brigade *obb;
   int closing;
+  int using_draft75;
 } WebSocketState;
 
 static size_t mod_websocket_plugin_send(const struct _WebSocketServer *server, const int type, const unsigned char *buffer, const size_t buffer_size)
@@ -188,7 +190,7 @@ static size_t mod_websocket_plugin_send(const struct _WebSocketServer *server, c
           written = buffer_size;
         }
 
-        if ((type == 0xFF) && (buffer == NULL) && (buffer_size == 0)) {
+        if ((type == 0xFF) && (buffer == NULL) && (buffer_size == 0) && !ws_state->using_draft75) {
           /* Special case for closing the connection */
           ws_state->closing = 1;
         }
@@ -214,14 +216,15 @@ static void mod_websocket_plugin_close(const WebSocketServer *server)
   if ((server != NULL) && (server->state != NULL)) {
     WebSocketState *ws_state = (WebSocketState *) server->state;
 
-    /* send closing handshake */
-    mod_websocket_plugin_send(server, 0xFF, NULL, 0);
-
-    /*
-     * The clients -- at least Chrome and Safari (with latest WebKit) -- do not
-     * respond to the "terminate the WebSocket connection" byte sequence of
-     * 0xFF 0x00. Instead, just close the connection.
-     */
+    if (!ws_state->using_draft75) {
+      /* Send closing handshake */
+      mod_websocket_plugin_send(server, 0xFF, NULL, 0);
+      /*
+       * The clients -- at least Chrome and Safari (with latest WebKit) -- do not
+       * respond to the "terminate the WebSocket connection" byte sequence of
+       * 0xFF 0x00. So, just close the connection.
+       */
+    }
     ws_state->r->connection->keepalive = AP_CONN_CLOSE;
 
     ap_lingering_close(ws_state->r->connection); /* Is there a better way? -- FIXME */
@@ -342,43 +345,54 @@ static int mod_websocket_method_handler(request_rec *r)
       const char *sec_websocket_key1 = apr_table_get(r->headers_in, "Sec-WebSocket-Key1");
       const char *sec_websocket_key2 = apr_table_get(r->headers_in, "Sec-WebSocket-Key2");
 
-      if ((connection != NULL) &&
-          (sec_websocket_key1 != NULL) &&
-          (sec_websocket_key2 != NULL)) {
-        if (!strcasecmp(connection, "Upgrade")) {
-          const char *host = apr_table_get(r->headers_in, "Host"); /* Verify -- FIXME */
-          const char *origin = apr_table_get(r->headers_in, "Origin"); /* Verify -- FIXME */
-          const char *cookie = apr_table_get(r->headers_in, "Cookie");
-          const char *sec_websocket_protocol = apr_table_get(r->headers_in, "Sec-WebSocket-Protocol");
-          char sec_websocket_key3[8] = {0};
-          ap_filter_t *input_filter = r->input_filters;
+      if ((connection != NULL) && !strcasecmp(connection, "Upgrade")) {
+        websocket_config_rec *conf = (websocket_config_rec *) ap_get_module_config(r->per_dir_config, &websocket_module);
 
-          /*
-           * Since we are handling a WebSocket connection, not a standard HTTP
-           * connection, remove the HTTP input filter.
-           */
-          while (input_filter != NULL) {
-            if ((input_filter->frec != NULL) &&
-                (input_filter->frec->name != NULL) &&
-                !strcasecmp(input_filter->frec->name, "HTTP_IN")) {
-              ap_remove_input_filter(input_filter);
-              break;
-            }
-            input_filter = input_filter->next;
+        if ((conf != NULL) && (conf->plugin != NULL)) {
+          int using_draft75;
+
+          if ((sec_websocket_key1 != NULL) &&
+              (sec_websocket_key2 != NULL)) {
+            /* Draft-76 */
+            using_draft75 = 0;
+          } else if (conf->support_draft75) {
+            /* Draft-75 (use 4 so we can easily skip past the four bytes of "Sec-" when creating the output header) */
+            using_draft75 = 4;
+          } else {
+            /* Invalid */
+            using_draft75 = -1;
           }
+          if (using_draft75 != -1) {
+            const char *host = apr_table_get(r->headers_in, "Host"); /* Verify -- FIXME */
+            const char *origin = apr_table_get(r->headers_in, "Origin"); /* Verify -- FIXME */
+            const char *cookie = apr_table_get(r->headers_in, "Cookie");
+            const char *sec_websocket_protocol = apr_table_get(r->headers_in, "Sec-WebSocket-Protocol" + using_draft75);
+            char sec_websocket_key3[8] = {0};
+            ap_filter_t *input_filter = r->input_filters;
 
-          /* Key3 is provided in the content body. */
-          if (mod_websocket_read_block(r, sec_websocket_key3, 8) == 8) {
-            unsigned char response[APR_MD5_DIGESTSIZE];
+            /*
+             * Since we are handling a WebSocket connection, not a standard HTTP
+             * connection, remove the HTTP input filter.
+             */
+            while (input_filter != NULL) {
+              if ((input_filter->frec != NULL) &&
+                  (input_filter->frec->name != NULL) &&
+                  !strcasecmp(input_filter->frec->name, "HTTP_IN")) {
+                ap_remove_input_filter(input_filter);
+                break;
+              }
+              input_filter = input_filter->next;
+            }
 
-            if (!mod_websocket_handshake(sec_websocket_key1, sec_websocket_key2, sec_websocket_key3, response)) {
-              websocket_config_rec *conf = (websocket_config_rec *) ap_get_module_config(r->per_dir_config, &websocket_module);
-              WebSocketState server_state = {r, NULL, 0};
-              WebSocketServer server = {
-                sizeof(WebSocketServer), 1, &server_state, mod_websocket_plugin_send, mod_websocket_plugin_close
-              };
+            /* Key3 is provided in the content body. */
+            if (using_draft75 || (mod_websocket_read_block(r, sec_websocket_key3, 8) == 8)) {
+              unsigned char response[APR_MD5_DIGESTSIZE];
 
-              if ((conf != NULL) && (conf->plugin != NULL)) {
+              if (using_draft75 || !mod_websocket_handshake(sec_websocket_key1, sec_websocket_key2, sec_websocket_key3, response)) {
+                WebSocketState server_state = {r, NULL, 0, using_draft75};
+                WebSocketServer server = {
+                  sizeof(WebSocketServer), 1, &server_state, mod_websocket_plugin_send, mod_websocket_plugin_close
+                };
                 void *plugin_private = (conf->plugin->on_connect != NULL) ? conf->plugin->on_connect(&server) : NULL;
                 const int secure = 0; /* How do we determine if this is a secure connection or not? -- FIXME */
                 const char *location = apr_pstrcat(r->pool, (secure ? "wss://" : "ws://"), host, r->parsed_uri.path, NULL);
@@ -386,12 +400,12 @@ static int mod_websocket_method_handler(request_rec *r)
                 apr_table_clear(r->headers_out);
                 apr_table_setn(r->headers_out, "Upgrade", "WebSocket");
                 apr_table_setn(r->headers_out, "Connection", "Upgrade");
-                apr_table_setn(r->headers_out, "Sec-WebSocket-Location", location);
+                apr_table_setn(r->headers_out, "Sec-WebSocket-Location" + using_draft75, location);
                 if (origin != NULL) {
-                  apr_table_setn(r->headers_out, "Sec-WebSocket-Origin", origin);
+                  apr_table_setn(r->headers_out, "Sec-WebSocket-Origin" + using_draft75, origin);
                 }
                 if (sec_websocket_protocol != NULL) {
-                  apr_table_setn(r->headers_out, "Sec-WebSocket-Protocol", sec_websocket_protocol);
+                  apr_table_setn(r->headers_out, "Sec-WebSocket-Protocol" + using_draft75, sec_websocket_protocol);
                 }
                 if (cookie != NULL) {
                   /* Handle cookies -- FIXME */
@@ -399,7 +413,7 @@ static int mod_websocket_method_handler(request_rec *r)
 
                 /* Set response status code and status line */
                 r->status = 101;
-                r->status_line = "101 WebSocket Protocol Handshake";
+                r->status_line = using_draft75 ? "101 Web Socket Protocol Handshake" : "101 WebSocket Protocol Handshake";
 
                 /* Send the headers */
                 ap_send_interim_response(r, 1);
@@ -415,9 +429,11 @@ static int mod_websocket_method_handler(request_rec *r)
                   apr_size_t data_limit = 33554432; /* Make this a user configurable setting -- FIXME */
                   int state = DATA_FRAMING_READ_TYPE, type = -1;
 
-                  /* Write the handshake response */
-                  ap_fwrite(of, obb, (const char *)response, (apr_size_t)sizeof(response));
-                  ap_fflush(of, obb);
+                  if (!using_draft75) {
+                    /* Write the handshake response */
+                    ap_fwrite(of, obb, (const char *)response, (apr_size_t)sizeof(response));
+                    ap_fflush(of, obb);
+                  }
 
                   /* Allow the plugin to now write to the client */
                   server_state.obb = obb;
@@ -496,7 +512,7 @@ static int mod_websocket_method_handler(request_rec *r)
                           if ((block[block_offset] & 0x80) == 0) {
                             /* Encountered end-of-length marker */
                             if (data_length == 0) {
-                              state = (type == 0xFF) ? DATA_FRAMING_CLOSE : DATA_FRAMING_READ_TYPE;
+                              state = ((type == 0xFF) && !using_draft75) ? DATA_FRAMING_CLOSE : DATA_FRAMING_READ_TYPE;
                             } else {
                               state = DATA_FRAMING_IN_BINARY_DATA;
                             }
@@ -543,6 +559,8 @@ static const command_rec websocket_cmds[] =
 {
   AP_INIT_TAKE2("WebSocketHandler", mod_websocket_conf_handler, NULL, OR_AUTHCFG,
       "Shared library containing WebSocket implementation followed by function initialization function name"),
+  AP_INIT_FLAG("SupportDraft75", ap_set_flag_slot, (void*)APR_OFFSETOF(websocket_config_rec, support_draft75), OR_AUTHCFG,
+      "Support Draft-75 WebSocket Protocol"),
   {NULL}
 };
 

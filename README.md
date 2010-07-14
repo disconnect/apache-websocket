@@ -5,13 +5,9 @@ requests using the WebSocket protocol. The module consists of a plugin
 architecture for handling WebSocket messaging. Doing so does not require any
 knowledge of internal Apache structures.
 
-This implementation supports draft-76 of the WebSocket protocol. It does not
-support the older draft-75 protocol. The code should be easy enough to modify
-to support the older protocol. Make sure that your client supports the
-appropriate protocol. The Stable and Beta channels of Chrome, and the release
-version of Safari, do not yet implement the draft-76 protocol. The Dev channel
-of Chrome and the nightly WebKit builds (which may be used with Safari) do
-support it, however.
+This implementation supports both draft-75 and draft-76 of the WebSocket
+protocol. Support for draft-75 is disabled by default, but it may be enabled
+through the configuration.
 
 ## Download
 
@@ -56,7 +52,8 @@ the <code>on_message</code> function for handling incoming messages.
 See <code>examples/echo.c</code> for an example implementation of an "echo"
 plugin. A sample <code>client.html</code> is included as well. If you try it
 and you get a message that says Connection Closed, you are most likely using a
-client that does not support draft-76 of the protocol.
+client that only supports draft-75 of the protocol, but you have not enabled
+support for it.
 
 Since the plugins do not depend on Apache, you do not need to use
 <code>apxs</code> to build them. Also, it does not need to be placed in the same
@@ -72,7 +69,10 @@ block, set the handler, using the <code>SetHandler</code> keyword, to
 that contains two parameters. The first is the name of the dynamic plugin
 library that will service the requests for the specified location, and the
 second is the name of the function in the dynamic library that will initialize
-the plugin.
+the plugin. You may optionally include a flag for supporting the draft-75
+version of the WebSocket protocol (it will default to "off" if you do not
+include it). It is enabled using the <code>SupportDraft75</code> keyword, along
+with a value of <code>On</code>.
 
 Here is an example of the configuration changes to <code>http.conf</code> that
 are used to handle the WebSocket plugin requests directed at
@@ -85,6 +85,7 @@ are used to handle the WebSocket plugin requests directed at
       <Location /echo>
         SetHandler websocket-handler
         WebSocketHandler libexec/apache2/mod_websocket_echo.so echo_init
+        SupportDraft75 On
       </Location>
     </IfModule>
 
@@ -99,6 +100,7 @@ different from Mac OS X, it may look more like this:
       <Location /echo>
         SetHandler websocket-handler
         WebSocketHandler /usr/lib/apache2/modules/mod_websocket_echo.so echo_init
+        SupportDraft75 On
       </Location>
     </IfModule>
 
