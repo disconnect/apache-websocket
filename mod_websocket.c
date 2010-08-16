@@ -136,6 +136,7 @@ typedef struct _WebSocketState {
   request_rec *r;
   apr_bucket_brigade *obb;
   apr_thread_mutex_t *mutex;
+  apr_array_header_t *protocols;
   int closing;
   int using_draft75;
 } WebSocketState;
@@ -168,6 +169,55 @@ static void mod_websocket_header_set(const struct _WebSocketServer *server, cons
     if (state->r != NULL) {
       return apr_table_setn(state->r->headers_out, key, value);
     }
+  }
+}
+
+static void mod_websocket_parse_protocol(const WebSocketServer *server, const char *sec_websocket_protocol)
+{
+  /*
+   * The client-supplied WebSocket protocol entry consists of a space-delimited
+   * list of client-side supported protocols. Parse the list, and create an
+   * array containing those protocol names.
+   */
+  if ((server != NULL) && (server->state != NULL) && (server->state->r != NULL)) {
+    apr_array_header_t *protocols = apr_array_make(server->state->r->pool, 1, sizeof(char *));
+    char *protocol_state = NULL;
+    char *protocol = apr_strtok(apr_pstrdup(server->state->r->pool, sec_websocket_protocol), " ", &protocol_state);
+
+    while (protocol != NULL) {
+      APR_ARRAY_PUSH(protocols, char *) = protocol;
+      protocol = apr_strtok(NULL, " ", &protocol_state);
+    }
+    if (!apr_is_empty_array(protocols)) {
+      server->state->protocols = protocols;
+    }
+  }
+}
+
+static size_t mod_websocket_protocol_count(const struct _WebSocketServer *server)
+{
+  size_t count = 0;
+
+  if ((server != NULL) && (server->state != NULL) && (server->state->protocols != NULL) && !apr_is_empty_array(server->state->protocols)) {
+    count = (size_t) server->state->protocols->nelts;
+  }
+  return count;
+}
+
+static const char *mod_websocket_protocol_index(const struct _WebSocketServer *server, const size_t index)
+{
+  if ((index >= 0) && (index < mod_websocket_protocol_count(server))) {
+    return APR_ARRAY_IDX(server->state->protocols, index, char *);
+  }
+  return NULL;
+}
+
+static void mod_websocket_protocol_set(const struct _WebSocketServer *server, const char *protocol)
+{
+  if ((server != NULL) && (server->state != NULL)) {
+    WebSocketState *state = server->state;
+
+    mod_websocket_header_set(server, "Sec-WebSocket-Protocol" + state->using_draft75, protocol);
   }
 }
 
@@ -388,7 +438,6 @@ static int mod_websocket_method_handler(request_rec *r)
 
           if ((sec_websocket_key1 != NULL) &&
               (sec_websocket_key2 != NULL)) {
-            /* Draft-76 */
             using_draft75 = 0;
           } else if (conf->support_draft75) {
             /* Draft-75 (use 4 so we can easily skip past the four bytes of "Sec-" when creating the output header) */
@@ -433,9 +482,10 @@ static int mod_websocket_method_handler(request_rec *r)
               unsigned char response[APR_MD5_DIGESTSIZE];
 
               if (using_draft75 || !mod_websocket_handshake(sec_websocket_key1, sec_websocket_key2, sec_websocket_key3, response)) {
-                WebSocketState state = {r, NULL, NULL, 0, using_draft75};
+                WebSocketState state = {r, NULL, NULL, NULL, 0, using_draft75};
                 WebSocketServer server = {
-                  sizeof(WebSocketServer), 1, &state, mod_websocket_request, mod_websocket_header_get, mod_websocket_header_set, NULL, NULL
+                  sizeof(WebSocketServer), 1, &state, mod_websocket_request, mod_websocket_header_get, mod_websocket_header_set,
+                  mod_websocket_protocol_count, mod_websocket_protocol_index, mod_websocket_protocol_set, NULL, NULL
                 };
                 const char *location = apr_pstrcat(r->pool, (secure ? "wss://" : "ws://"), host, r->parsed_uri.path, NULL);
                 void *plugin_private = NULL;
@@ -447,8 +497,16 @@ static int mod_websocket_method_handler(request_rec *r)
                 if (origin != NULL) {
                   apr_table_setn(r->headers_out, "Sec-WebSocket-Origin" + using_draft75, origin);
                 }
+
+                /* Handle the WebSocket protocol */
                 if (sec_websocket_protocol != NULL) {
-                  apr_table_setn(r->headers_out, "Sec-WebSocket-Protocol" + using_draft75, sec_websocket_protocol);
+                  /* Parse the WebSocket protocol entry */
+                  mod_websocket_parse_protocol(&server, sec_websocket_protocol);
+
+                  if (mod_websocket_protocol_count(&server) > 0) {
+                    /* Default to using the first protocol in the list (plugin may be overide this in on_connect) */
+                    mod_websocket_protocol_set(&server, mod_websocket_protocol_index(&server, 0));
+                  }
                 }
 
                 /* If the plugin supplies an on_connect function, it must return non-null on success */
@@ -583,6 +641,9 @@ static int mod_websocket_method_handler(request_rec *r)
                     if (extended_data != NULL) {
                       free(extended_data);
                     }
+
+                    /* Send server-side closing handshake */
+                    mod_websocket_plugin_send(&server, 0xFF, NULL, 0);
 
                     /* Disallow the plugin from writing to the client */
                     apr_thread_mutex_lock(state.mutex);

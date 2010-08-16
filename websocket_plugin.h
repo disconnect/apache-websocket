@@ -36,6 +36,9 @@ struct _WebSocketServer;
 typedef struct request_rec *(CALLBACK *WS_Request)(const struct _WebSocketServer *server);
 typedef const char *(CALLBACK *WS_Header_Get)(const struct _WebSocketServer *server, const char *key);
 typedef void (CALLBACK *WS_Header_Set)(const struct _WebSocketServer *server, const char *key, const char *value);
+typedef size_t (CALLBACK *WS_Protocol_Count)(const struct _WebSocketServer *server);
+typedef const char *(CALLBACK *WS_Protocol_Index)(const struct _WebSocketServer *server, const size_t index);
+typedef void (CALLBACK *WS_Protocol_Set)(const struct _WebSocketServer *server, const char *protocol);
 typedef size_t (CALLBACK *WS_Send)(const struct _WebSocketServer *server, const int type, const unsigned char *buffer, const size_t buffer_size);
 typedef void (CALLBACK *WS_Close)(const struct _WebSocketServer *server);
 
@@ -46,6 +49,9 @@ typedef struct _WebSocketServer {
   WS_Request request;
   WS_Header_Get header_get;
   WS_Header_Set header_set;
+  WS_Protocol_Count protocol_count;
+  WS_Protocol_Index protocol_index;
+  WS_Protocol_Set protocol_set;
   WS_Send send;
   WS_Close close;
 } WebSocketServer;

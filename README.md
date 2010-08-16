@@ -5,7 +5,7 @@ requests using the WebSocket protocol. The module consists of a plugin
 architecture for handling WebSocket messaging. Doing so does not _require_ any
 knowledge of internal Apache structures.
 
-This implementation supports both draft-75 and draft-76 of the WebSocket
+This implementation supports draft-75, draft-76, and draft-77 of the WebSocket
 protocol. Support for draft-75 is disabled by default, but it may be enabled
 through the configuration.
 
@@ -49,7 +49,7 @@ set to point to the various functions that will service the requests. The only
 required function is the `on_message` function for handling incoming messages.
 
 See `examples/echo.c` for a simple example implementation of an "echo" plugin.
-A sample `echo.html` is included as well. If you try it and you get a message
+A sample `client.html` is included as well. If you try it and you get a message
 that says Connection Closed, you are most likely using a client that only
 supports draft-75 of the protocol, but you have not enabled support for it.
 
@@ -58,10 +58,11 @@ connection, and null if you wish to decline the connection. The return value
 will be passed to your other methods for that connection. During your
 `on_connect` function, you may access the Apache `request_rec` structure if you
 wish. You will have to include the appropriate Apache include files. If you do
-not wish to do that, you may access the headers (both input and output) using
-the provided functions. You may not access the `send` or `close` functions
-while connecting, as the connection will not be completed until you return from
-the function.
+not wish to do that, you may also access the headers (both input and output)
+using the provided functions. There are also protocol-specific handling
+functions for selecting the desired protocol for this WebSocket session. You
+may not access the `send` or `close` functions while connecting, as the
+connection will not be completed until you return from the function.
 
 If your plugin does not depend on Apache, you do not need to use `apxs` to
 build them. Also, it does not need to be placed in the same directory as the
