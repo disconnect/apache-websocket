@@ -34,6 +34,7 @@
 #include "websocket_plugin.h"
 
 #define CORE_PRIVATE
+#include "http_core.h"
 #include "http_connection.h"
 
 module AP_MODULE_DECLARE_DATA websocket_module;
@@ -512,6 +513,9 @@ static int mod_websocket_method_handler(request_rec *r)
                 /* If the plugin supplies an on_connect function, it must return non-null on success */
                 if ((conf->plugin->on_connect == NULL) ||
                     ((plugin_private = conf->plugin->on_connect(&server)) != NULL)) {
+                  /* Now that the connection has been established, disable the socket timeout */
+                  apr_socket_timeout_set(ap_get_module_config(r->connection->conn_config, &core_module), -1);
+
                   apr_thread_mutex_create(&state.mutex, APR_THREAD_MUTEX_DEFAULT, r->pool);
 
                   apr_thread_mutex_lock(state.mutex);

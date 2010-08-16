@@ -60,7 +60,7 @@ will be passed to your other methods for that connection. During your
 wish. You will have to include the appropriate Apache include files. If you do
 not wish to do that, you may also access the headers (both input and output)
 using the provided functions. There are also protocol-specific handling
-functions for selecting the desired protocol for this WebSocket session. You
+functions for selecting the desired protocol for the WebSocket session. You
 may not access the `send` or `close` functions while connecting, as the
 connection will not be completed until you return from the function.
 
