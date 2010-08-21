@@ -617,23 +617,52 @@ static int mod_websocket_method_handler(request_rec *r)
                             }
                             break;
                           case DATA_FRAMING_IN_BINARY_DATA:
-                            /* Handle binary data frames -- FIXME */
-                            framing_state = DATA_FRAMING_CLOSE;
+                            /* Handle binary data frames */
+                            if (extended_data != NULL) {
+                              apr_size_t block_data_length;
+
+                              block_length = block_size - block_offset;
+                              block_data_length = (data_length > block_length) ? block_length : data_length;
+                              memmove(&extended_data[extended_data_offset], &block[block_offset], block_data_length);
+                              extended_data_offset += block_data_length;
+                              block_offset += block_data_length;
+                              data_length -= block_data_length;
+
+                              if (data_length == 0) {
+                                /*
+                                 * Binary data frames aren't supported by the
+                                 * specification, so don't pass them on to the
+                                 * plugin. Just silently discard the data.
+                                 *
+                                 * conf->plugin->on_message(plugin_private, &server, type, extended_data, extended_data_offset);
+                                 */
+                                extended_data_offset = 0;
+                                type = -1;
+                                framing_state = DATA_FRAMING_READ_TYPE;
+                              }
+                            } else {
+                              framing_state = DATA_FRAMING_CLOSE;
+                            }
                             break;
                           case DATA_FRAMING_IN_BINARY_LENGTH:
                             data_length = data_length*128 + (block[block_offset] & 0x7F);
 
-                            if ((block[block_offset] & 0x80) == 0) {
+                            if (data_length > data_limit) {
+                              /* Exceeded implementation-specific limit */
+                              framing_state = DATA_FRAMING_CLOSE;
+                            } else if ((block[block_offset] & 0x80) == 0) {
                               /* Encountered end-of-length marker */
                               if (data_length == 0) {
                                 framing_state = ((type == 0xFF) && !using_draft75) ? DATA_FRAMING_CLOSE : DATA_FRAMING_READ_TYPE;
                               } else {
+                                /* Always use the extended data to handle binary content */
+                                if (data_length > extended_data_size) {
+                                  extended_data_size = data_length;
+                                  extended_data = (unsigned char *) realloc(extended_data, extended_data_size*sizeof(unsigned char));
+                                }
+                                extended_data_offset = 0;
                                 framing_state = DATA_FRAMING_IN_BINARY_DATA;
                               }
-                            }
-                            if (data_length > data_limit) {
-                              /* Exceeded implementation-specific limit */
-                              framing_state = DATA_FRAMING_CLOSE;
                             }
                             block_offset++;
                             break;

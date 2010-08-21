@@ -5,9 +5,11 @@ requests using the WebSocket protocol. The module consists of a plugin
 architecture for handling WebSocket messaging. Doing so does not _require_ any
 knowledge of internal Apache structures.
 
-This implementation supports draft-75, draft-76, and draft-77 of the WebSocket
+This implementation supports both draft-75 and draft-76 of the WebSocket
 protocol. Support for draft-75 is disabled by default, but it may be enabled
 through the configuration.
+
+This implementation also includes support for handling subprotocols.
 
 ## Download
 
