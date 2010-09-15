@@ -5,15 +5,24 @@ env = Environment()
 debug = ARGUMENTS.get("debug", 0)
 
 if env["PLATFORM"] == "win32":
-    env.Append(CCFLAGS = ["/EHsc", "/W3"])
+    apachedir = "C:/Program Files/Apache Software Foundation/Apache2.2"
+
     if int(debug):
         env.Append(CCFLAGS = ["/Zi", "/Od", "/MDd"],
                    LINKFLAGS = ["/DEBUG"])
     else:
         env.Append(CCFLAGS = ["/O2", "/MD"])
-    modulesdir = "" # FIXME
+    env.Append(CCFLAGS = ["/EHsc", "/W3"],
+               CPPPATH = [".."],
+               SHLINKCOM=["mt.exe -nologo -manifest ${TARGET}.manifest -outputresource:$TARGET;2"])
+    env.SideEffect(["mod_websocket_echo.so.manifest", "mod_websocket_echo.exp", "mod_websocket_echo.lib"], "mod_websocket_echo.so")
+
+    env["no_import_lib"] = "true"
+
+    modulesdir = apachedir+"/modules"
 else:
-    env.Append(CCFLAGS = ["-Wall", "-pipe", "-I.."])
+    env.Append(CCFLAGS = ["-Wall", "-pipe"],
+               CPPPATH = [".."])
     if int(debug):
         env.Append(CCFLAGS = ["-g"])
     else:
@@ -25,7 +34,7 @@ else:
     else:
         modulesdir = "" # FIXME
 
-echo = env.SharedLibrary(target = "mod_websocket_echo.so", source=["echo.c"],
+echo = env.SharedLibrary(source=["mod_websocket_echo.c"],
                          SHLIBPREFIX="",
                          SHLIBSUFFIX=".so")
 

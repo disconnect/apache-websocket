@@ -4,6 +4,9 @@
 .libs
 *.la
 *.lo
+*.manifest
+*.exp
+*.lib
 *.o
 *.obj
 *.os

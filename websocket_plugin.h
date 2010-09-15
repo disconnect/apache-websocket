@@ -58,7 +58,7 @@ typedef struct _WebSocketServer {
 
 struct _WebSocketPlugin;
 
-typedef struct _WebSocketPlugin *(EXPORT *WS_Init)();
+typedef struct _WebSocketPlugin *(CALLBACK *WS_Init)();
 typedef void (CALLBACK *WS_Destroy)(struct _WebSocketPlugin *plugin);
 
 typedef void *(CALLBACK *WS_OnConnect)(const WebSocketServer *server); /* Returns plugin_private */

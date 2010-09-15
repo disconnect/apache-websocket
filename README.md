@@ -18,12 +18,20 @@ This implementation also includes support for handling subprotocols.
 ## Building and Installation
 
 SCons may be used to build the module. However, it is currently only configured
-to build under Mac OS X.
+to build under Mac OS X and Windows.
 
     $ scons
     $ sudo scons install
 
-Alternatively, you may use `apxs` to build and install the module.  Under Linux
+For Windows, do not include the word `sudo` when installing the module. Also,
+the `SConstruct` file is hard-coded to look for the Apache headers and
+libraries in `C:\Program Files\Apache Software Foundation\Apache2.2`. You
+will need to install the headers and libraries when installing Apache. The
+`Build Headers and Libraries` option is disabled by default, so you will have
+to perform a `Custom` installation of Apache. Refer to the Apache document
+entitled _Using Apache HTTP Server on Microsoft Windows_ for more information.
+
+Alternatively, you may use `apxs` to build and install the module. Under Linux
 (at least under Ubuntu 10.04 LTS), use:
 
     $ sudo apxs2 -i -a -c mod_websocket.c
@@ -32,8 +40,8 @@ You probably only want to use the `-a` option the first time you issue the
 command, as it may overwrite your configuration each time you execute it (see
 below).
 
-You may use `apxs` under Mac OS X as well if you do not want to use SCons. In
-that case, use:
+You may use `apxs` under Mac OS X if you do not want to use SCons. In that
+case, use:
 
     $ sudo apxs -i -a -c mod_websocket.c
 
@@ -50,10 +58,11 @@ structure, the version should be set to 0, and the function pointers should be
 set to point to the various functions that will service the requests. The only
 required function is the `on_message` function for handling incoming messages.
 
-See `examples/echo.c` for a simple example implementation of an "echo" plugin.
-A sample `client.html` is included as well. If you try it and you get a message
-that says Connection Closed, you are most likely using a client that only
-supports draft-75 of the protocol, but you have not enabled support for it.
+See `examples/mod_websocket_echo.c` for a simple example implementation of an
+"echo" plugin. A sample `client.html` is included as well. If you try it and
+you get a message that says Connection Closed, you are most likely using a
+client that only supports draft-75 of the protocol, but you have not enabled
+support for it.
 
 If you provide an `on_connect` function, return a non-null value to accept the
 connection, and null if you wish to decline the connection. The return value
@@ -116,6 +125,19 @@ X, it may look more like this:
 
 This is the configuration that may be overwritten when the `-a` option is
 included using `axps2`, so be careful.
+
+Under Windows, the initialization function is of the form `_echo_init@0`, as it
+is using the `__stdcall` calling convention:
+
+    LoadModule websocket_module modules/mod_websocket.so
+
+    <IfModule mod_websocket.c>
+      <Location /echo>
+        SetHandler websocket-handler
+        WebSocketHandler modules/mod_websocket_echo.so _echo_init@0
+        SupportDraft75 On
+      </Location>
+    </IfModule>
 
 ## Authors
 

@@ -16,7 +16,7 @@
 
 #include "websocket_plugin.h"
 
-static size_t echo_on_message(void *plugin_private, const WebSocketServer *server,
+static size_t CALLBACK echo_on_message(void *plugin_private, const WebSocketServer *server,
     const int type, unsigned char *buffer, const size_t buffer_size)
 {
   return server->send(server, type, buffer, buffer_size);
@@ -37,7 +37,7 @@ static WebSocketPlugin s_plugin = {
   NULL /* on_disconnect */
 };
 
-extern WebSocketPlugin *echo_init()
+extern EXPORT WebSocketPlugin * CALLBACK echo_init()
 {
   return &s_plugin;
 }

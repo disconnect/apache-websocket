@@ -24,12 +24,12 @@
  *   Apache API inteface structures
  */
 
+#include "apr_md5.h"
+#include "apr_strings.h"
+
 #include "httpd.h"
 #include "http_config.h"
 #include "http_protocol.h"
-
-#include "apr_md5.h"
-#include "apr_strings.h"
 
 #include "websocket_plugin.h"
 
@@ -142,7 +142,7 @@ typedef struct _WebSocketState {
   int using_draft75;
 } WebSocketState;
 
-static request_rec *mod_websocket_request(const struct _WebSocketServer *server)
+static request_rec * CALLBACK mod_websocket_request(const struct _WebSocketServer *server)
 {
   if ((server != NULL) && (server->state != NULL)) {
     return server->state->r;
@@ -150,7 +150,7 @@ static request_rec *mod_websocket_request(const struct _WebSocketServer *server)
   return NULL;
 }
 
-static const char *mod_websocket_header_get(const struct _WebSocketServer *server, const char *key)
+static const char * CALLBACK mod_websocket_header_get(const struct _WebSocketServer *server, const char *key)
 {
   if ((server != NULL) && (server->state != NULL) && (key != NULL)) {
     WebSocketState *state = server->state;
@@ -162,13 +162,13 @@ static const char *mod_websocket_header_get(const struct _WebSocketServer *serve
   return NULL;
 }
 
-static void mod_websocket_header_set(const struct _WebSocketServer *server, const char *key, const char *value)
+static void CALLBACK mod_websocket_header_set(const struct _WebSocketServer *server, const char *key, const char *value)
 {
   if ((server != NULL) && (server->state != NULL) && (key != NULL) && (value != NULL)) {
     WebSocketState *state = server->state;
 
     if (state->r != NULL) {
-      return apr_table_setn(state->r->headers_out, key, value);
+      apr_table_setn(state->r->headers_out, key, value);
     }
   }
 }
@@ -195,7 +195,7 @@ static void mod_websocket_parse_protocol(const WebSocketServer *server, const ch
   }
 }
 
-static size_t mod_websocket_protocol_count(const struct _WebSocketServer *server)
+static size_t CALLBACK mod_websocket_protocol_count(const struct _WebSocketServer *server)
 {
   size_t count = 0;
 
@@ -205,7 +205,7 @@ static size_t mod_websocket_protocol_count(const struct _WebSocketServer *server
   return count;
 }
 
-static const char *mod_websocket_protocol_index(const struct _WebSocketServer *server, const size_t index)
+static const char * CALLBACK mod_websocket_protocol_index(const struct _WebSocketServer *server, const size_t index)
 {
   if ((index >= 0) && (index < mod_websocket_protocol_count(server))) {
     return APR_ARRAY_IDX(server->state->protocols, index, char *);
@@ -213,7 +213,7 @@ static const char *mod_websocket_protocol_index(const struct _WebSocketServer *s
   return NULL;
 }
 
-static void mod_websocket_protocol_set(const struct _WebSocketServer *server, const char *protocol)
+static void CALLBACK mod_websocket_protocol_set(const struct _WebSocketServer *server, const char *protocol)
 {
   if ((server != NULL) && (server->state != NULL)) {
     WebSocketState *state = server->state;
@@ -222,7 +222,7 @@ static void mod_websocket_protocol_set(const struct _WebSocketServer *server, co
   }
 }
 
-static size_t mod_websocket_plugin_send(const struct _WebSocketServer *server, const int type, const unsigned char *buffer, const size_t buffer_size)
+static size_t CALLBACK mod_websocket_plugin_send(const struct _WebSocketServer *server, const int type, const unsigned char *buffer, const size_t buffer_size)
 {
   size_t written = 0;
 
@@ -297,7 +297,7 @@ static size_t mod_websocket_plugin_send(const struct _WebSocketServer *server, c
   return written;
 }
 
-static void mod_websocket_plugin_close(const WebSocketServer *server)
+static void CALLBACK mod_websocket_plugin_close(const WebSocketServer *server)
 {
   if ((server != NULL) && (server->state != NULL)) {
     WebSocketState *state = server->state;
@@ -513,6 +513,8 @@ static int mod_websocket_method_handler(request_rec *r)
                 /* If the plugin supplies an on_connect function, it must return non-null on success */
                 if ((conf->plugin->on_connect == NULL) ||
                     ((plugin_private = conf->plugin->on_connect(&server)) != NULL)) {
+                  apr_bucket_brigade *obb;
+
                   /* Now that the connection has been established, disable the socket timeout */
                   apr_socket_timeout_set(ap_get_module_config(r->connection->conn_config, &core_module), -1);
 
@@ -532,8 +534,7 @@ static int mod_websocket_method_handler(request_rec *r)
                   ap_send_interim_response(r, 1);
 
                   /* Create the output bucket brigade */
-                  ap_filter_t *of = r->connection->output_filters;
-                  apr_bucket_brigade *obb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+                  obb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 
                   if (obb != NULL) {
                     unsigned char block[BLOCK_DATA_SIZE], *extended_data = NULL;
@@ -541,6 +542,7 @@ static int mod_websocket_method_handler(request_rec *r)
                     apr_size_t block_size, data_length = 0, extended_data_size = 0;
                     apr_size_t data_limit = 33554432; /* Make this a user configurable setting -- FIXME */
                     int framing_state = DATA_FRAMING_READ_TYPE, type = -1;
+                    ap_filter_t *of = r->connection->output_filters;
 
                     if (!using_draft75) {
                       /* Write the handshake response */
@@ -570,7 +572,7 @@ static int mod_websocket_method_handler(request_rec *r)
                               if (block[block_offset++] == 0xFF) { /* End of data */
                                 unsigned char *message;
 
-                                block_length = block_offset - block_data_offset - 1;
+                                block_length = (apr_size_t)(block_offset - block_data_offset - 1);
                                 data_length += block_length;
 
                                 if (extended_data_offset > 0) {
@@ -590,7 +592,7 @@ static int mod_websocket_method_handler(request_rec *r)
                               /* The data spans blocks */
                               unsigned char *previous_extended_data = extended_data;
 
-                              block_length = block_offset - block_data_offset;
+                              block_length = (apr_size_t)(block_offset - block_data_offset);
                               data_length += block_length;
                               /*
                                * If the new block data will extended past the end
@@ -621,7 +623,7 @@ static int mod_websocket_method_handler(request_rec *r)
                             if (extended_data != NULL) {
                               apr_size_t block_data_length;
 
-                              block_length = block_size - block_offset;
+                              block_length = (apr_size_t)(block_size - block_offset);
                               block_data_length = (data_length > block_length) ? block_length : data_length;
                               memmove(&extended_data[extended_data_offset], &block[block_offset], block_data_length);
                               extended_data_offset += block_data_length;
