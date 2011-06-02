@@ -1,5 +1,5 @@
 /*
- * Copyright 2010 self.disconnect
+ * Copyright 2010-2011 self.disconnect
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ static size_t CALLBACK echo_on_message(void *plugin_private, const WebSocketServ
 
 static WebSocketPlugin s_plugin = {
   sizeof(WebSocketPlugin),
-  0,
+  WEBSOCKET_PLUGIN_VERSION_0,
   NULL, /* destroy */
   NULL, /* on_connect */
   echo_on_message,

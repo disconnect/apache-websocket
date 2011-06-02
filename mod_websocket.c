@@ -1,5 +1,5 @@
 /*
- * Copyright 2010 self.disconnect
+ * Copyright 2010-2011 self.disconnect
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,8 @@
  *   Apache API inteface structures
  */
 
-#include "apr_md5.h"
+#include "apr_base64.h"
+#include "apr_sha1.h"
 #include "apr_strings.h"
 
 #include "httpd.h"
@@ -40,21 +41,43 @@
 module AP_MODULE_DECLARE_DATA websocket_module;
 
 typedef struct {
-  int support_draft75;
   char *location;
   apr_dso_handle_t *res_handle;
   WebSocketPlugin *plugin;
 } websocket_config_rec;
 
-/* The extended data size must be at least as big as the block data size */
 #define BLOCK_DATA_SIZE              4096
-#define EXTENDED_DATA_SIZE          16384
 
-#define DATA_FRAMING_READ_TYPE          0
-#define DATA_FRAMING_IN_TEXT_DATA       1
-#define DATA_FRAMING_IN_BINARY_DATA     2
-#define DATA_FRAMING_IN_BINARY_LENGTH   3
-#define DATA_FRAMING_CLOSE              4
+#define DATA_FRAMING_MASK               0
+#define DATA_FRAMING_START              1
+#define DATA_FRAMING_PAYLOAD_LENGTH     2
+#define DATA_FRAMING_PAYLOAD_LENGTH_EXT 3
+#define DATA_FRAMING_EXTENSION_DATA     4
+#define DATA_FRAMING_APPLICATION_DATA   5
+#define DATA_FRAMING_CLOSE              6
+
+#define FRAME_GET_FIN(BYTE)         (((BYTE) >> 7) & 0x01)
+#define FRAME_GET_RSV1(BYTE)        (((BYTE) >> 6) & 0x01)
+#define FRAME_GET_RSV2(BYTE)        (((BYTE) >> 5) & 0x01)
+#define FRAME_GET_RSV3(BYTE)        (((BYTE) >> 4) & 0x01)
+#define FRAME_GET_OPCODE(BYTE)      ( (BYTE)       & 0x0F)
+#define FRAME_GET_MASK(BYTE)        (((BYTE) >> 7) & 0x01)
+#define FRAME_GET_PAYLOAD_LEN(BYTE) ( (BYTE)       & 0x7F)
+
+#define FRAME_SET_FIN(BYTE)         (((BYTE) & 0x01) << 7)
+#define FRAME_SET_OPCODE(BYTE)       ((BYTE) & 0x0F)
+#define FRAME_SET_MASK(BYTE)        (((BYTE) & 0x01) << 7)
+#define FRAME_SET_LENGTH(X64, IDX)  (unsigned char)(((X64) >> ((IDX)*8)) & 0xFF)
+
+#define OPCODE_CONTINUATION 0x0
+#define OPCODE_TEXT         0x1
+#define OPCODE_BINARY       0x2
+#define OPCODE_CLOSE        0x8
+#define OPCODE_PING         0x9
+#define OPCODE_PONG         0xA
+
+#define WEBSOCKET_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+#define WEBSOCKET_GUID_LEN 36
 
 /*
  * Configuration
@@ -105,7 +128,7 @@ static const char *mod_websocket_conf_handler(cmd_parms *cmd, void *confv, const
       if ((apr_dso_sym(&sym, res_handle, name) == APR_SUCCESS) && (sym != NULL)) {
         WebSocketPlugin *plugin = ((WS_Init)sym)();
         if ((plugin != NULL) &&
-            (plugin->version == 0) &&
+            (plugin->version == WEBSOCKET_PLUGIN_VERSION_0) &&
             (plugin->size >= sizeof(WebSocketPlugin)) &&
             (plugin->on_message != NULL)) { /* Require an on_message handler */
           conf->res_handle = res_handle;
@@ -139,7 +162,6 @@ typedef struct _WebSocketState {
   apr_thread_mutex_t *mutex;
   apr_array_header_t *protocols;
   int closing;
-  int using_draft75;
 } WebSocketState;
 
 static request_rec * CALLBACK mod_websocket_request(const struct _WebSocketServer *server)
@@ -152,10 +174,10 @@ static request_rec * CALLBACK mod_websocket_request(const struct _WebSocketServe
 
 static const char * CALLBACK mod_websocket_header_get(const struct _WebSocketServer *server, const char *key)
 {
-  if ((server != NULL) && (server->state != NULL) && (key != NULL)) {
+  if ((server != NULL) && (key != NULL)) {
     WebSocketState *state = server->state;
 
-    if (state->r != NULL) {
+    if ((state != NULL) && (state->r != NULL)) {
       return apr_table_get(state->r->headers_in, key);
     }
   }
@@ -164,33 +186,11 @@ static const char * CALLBACK mod_websocket_header_get(const struct _WebSocketSer
 
 static void CALLBACK mod_websocket_header_set(const struct _WebSocketServer *server, const char *key, const char *value)
 {
-  if ((server != NULL) && (server->state != NULL) && (key != NULL) && (value != NULL)) {
+  if ((server != NULL) && (key != NULL) && (value != NULL)) {
     WebSocketState *state = server->state;
 
-    if (state->r != NULL) {
-      apr_table_setn(state->r->headers_out, key, value);
-    }
-  }
-}
-
-static void mod_websocket_parse_protocol(const WebSocketServer *server, const char *sec_websocket_protocol)
-{
-  /*
-   * The client-supplied WebSocket protocol entry consists of a space-delimited
-   * list of client-side supported protocols. Parse the list, and create an
-   * array containing those protocol names.
-   */
-  if ((server != NULL) && (server->state != NULL) && (server->state->r != NULL)) {
-    apr_array_header_t *protocols = apr_array_make(server->state->r->pool, 1, sizeof(char *));
-    char *protocol_state = NULL;
-    char *protocol = apr_strtok(apr_pstrdup(server->state->r->pool, sec_websocket_protocol), " ", &protocol_state);
-
-    while (protocol != NULL) {
-      APR_ARRAY_PUSH(protocols, char *) = protocol;
-      protocol = apr_strtok(NULL, " ", &protocol_state);
-    }
-    if (!apr_is_empty_array(protocols)) {
-      server->state->protocols = protocols;
+    if ((state != NULL) && (state->r != NULL)) {
+      apr_table_setn(state->r->headers_out, apr_pstrdup(state->r->pool, key), apr_pstrdup(state->r->pool, value));
     }
   }
 }
@@ -215,16 +215,21 @@ static const char * CALLBACK mod_websocket_protocol_index(const struct _WebSocke
 
 static void CALLBACK mod_websocket_protocol_set(const struct _WebSocketServer *server, const char *protocol)
 {
-  if ((server != NULL) && (server->state != NULL)) {
+  if ((server != NULL) && (protocol != NULL)) {
     WebSocketState *state = server->state;
 
-    mod_websocket_header_set(server, "Sec-WebSocket-Protocol" + state->using_draft75, protocol);
+    if ((state != NULL) && (state->r != NULL)) {
+      apr_table_setn(state->r->headers_out, "Sec-WebSocket-Protocol",  apr_pstrdup(state->r->pool, protocol));
+    }
   }
 }
 
 static size_t CALLBACK mod_websocket_plugin_send(const struct _WebSocketServer *server, const int type, const unsigned char *buffer, const size_t buffer_size)
 {
+  apr_uint64_t payload_length = (apr_uint64_t)((buffer != NULL) ? buffer_size : 0);
   size_t written = 0;
+
+  /* Deal with size more that 63 bits  - FIXME */
 
   if ((server != NULL) && (server->state != NULL)) {
     WebSocketState *state = server->state;
@@ -232,65 +237,57 @@ static size_t CALLBACK mod_websocket_plugin_send(const struct _WebSocketServer *
     apr_thread_mutex_lock(state->mutex);
 
     if ((state->r != NULL) && (state->obb != NULL) && !state->closing) {
+      unsigned char header[32];
       ap_filter_t *of = state->r->connection->output_filters;
-      const char header = (char)type;
+      apr_size_t pos = 0;
+      unsigned char opcode;
 
-      ap_fwrite(of, state->obb, &header, 1);
-      if (type >= 0x80) {
-        /* Binary data */
-        char length[16], tmp;
-        size_t buffer_length = (buffer != NULL) ? buffer_size : 0;
-        int n = 0, half, i;
-
-        /* Fill in the length bytes (in reverse order) */
-        do {
-          /*
-           * Turn on the high-order bit for each byte in the length sequence
-           * (we will turn it off for the last byte later)
-           */
-          length[n++] = (buffer_length & 0x7F) | 0x80;
-          buffer_length >>= 7;
-        } while (buffer_length != 0);
-
-        /*
-         * Turn off the high-order bit for the last byte in the length sequence
-         * (which is actually the first, as the bytes are reversed)
-         */
-        length[0] &= 0x7F;
-
-        /* Since we filled in the length bytes backwards, reverse them */
-        half = n >> 1;
-        for (i = 0; i < half; i++) {
-          tmp = length[i];
-          length[i] = length[n - i - 1];
-          length[n - i - 1] = tmp;
-        }
-
-        /* Write the /length/ bytes */
-        ap_fwrite(of, state->obb, length, n);
-
-        if ((buffer != NULL) && (buffer_size > 0)) {
-          /* If we have /data/, write it */
-          ap_fwrite(of, state->obb, (const char *)buffer, buffer_size);
-          written = buffer_size;
-        }
-
-        if ((type == 0xFF) && (buffer == NULL) && (buffer_size == 0) && !state->using_draft75) {
-          /* Special case for closing the connection */
+      switch (type) {
+        case MESSAGE_TYPE_TEXT:
+          opcode = OPCODE_TEXT;
+          break;
+        case MESSAGE_TYPE_BINARY:
+          opcode = OPCODE_BINARY;
+          break;
+        case MESSAGE_TYPE_PING:
+          opcode = OPCODE_PING;
+          break;
+        case MESSAGE_TYPE_PONG:
+          opcode = OPCODE_PONG;
+          break;
+        case MESSAGE_TYPE_CLOSE:
+        default:
           state->closing = 1;
-        }
+          opcode = OPCODE_CLOSE;
+          break;
+      }
+      header[pos++] = FRAME_SET_FIN(1) | FRAME_SET_OPCODE(opcode);
+      if (payload_length < 126) {
+        header[pos++] = FRAME_SET_MASK(0) | FRAME_SET_LENGTH(payload_length, 0);
       } else {
-        /* Text data */
-        const char trailer = '\xFF';
-
-        if (buffer != NULL) {
-          /* If we have /data/, write it */
-          ap_fwrite(of, state->obb, (const char *)buffer, buffer_size);
+        if (payload_length < 65536) {
+          header[pos++] = FRAME_SET_MASK(0) | 126;
+        } else {
+          header[pos++] = FRAME_SET_MASK(0) | 127;
+          header[pos++] = FRAME_SET_LENGTH(payload_length, 7);
+          header[pos++] = FRAME_SET_LENGTH(payload_length, 6);
+          header[pos++] = FRAME_SET_LENGTH(payload_length, 5);
+          header[pos++] = FRAME_SET_LENGTH(payload_length, 4);
+          header[pos++] = FRAME_SET_LENGTH(payload_length, 3);
+          header[pos++] = FRAME_SET_LENGTH(payload_length, 2);
+        }
+        header[pos++] = FRAME_SET_LENGTH(payload_length, 1);
+        header[pos++] = FRAME_SET_LENGTH(payload_length, 0);
+      }
+      ap_fwrite(of, state->obb, (const char *)header, pos); /* Header */
+      if (payload_length > 0) {
+        if (ap_fwrite(of, state->obb, (const char *)buffer, buffer_size) == APR_SUCCESS) { /* Payload Data */
           written = buffer_size;
         }
-        ap_fwrite(of, state->obb, &trailer, 1);
       }
-      ap_fflush(of, state->obb);
+      if (ap_fflush(of, state->obb) != APR_SUCCESS) {
+        written = 0;
+      }
     }
     apr_thread_mutex_unlock(state->mutex);
   }
@@ -299,28 +296,16 @@ static size_t CALLBACK mod_websocket_plugin_send(const struct _WebSocketServer *
 
 static void CALLBACK mod_websocket_plugin_close(const WebSocketServer *server)
 {
-  if ((server != NULL) && (server->state != NULL)) {
-    WebSocketState *state = server->state;
-
-    if (!state->using_draft75) {
-      /* Send closing handshake */
-      mod_websocket_plugin_send(server, 0xFF, NULL, 0);
-      /*
-       * The clients -- at least Chrome and Safari (with latest WebKit) -- do not
-       * respond to the "terminate the WebSocket connection" byte sequence of
-       * 0xFF 0x00. So, just close the connection.
-       */
-    }
-    state->r->connection->keepalive = AP_CONN_CLOSE;
-
-    ap_lingering_close(state->r->connection); /* Is there a better way? -- FIXME */
+  if (server != NULL) {
+    /* Send closing handshake */
+    mod_websocket_plugin_send(server, MESSAGE_TYPE_CLOSE, NULL, 0);
   }
 }
 
 /*
  * Read a buffer of data from the input stream.
  */
-static int mod_websocket_read_block(request_rec *r, char *buffer, apr_size_t bufsiz)
+static apr_size_t mod_websocket_read_block(request_rec *r, char *buffer, apr_size_t bufsiz)
 {
   apr_status_t rv;
   apr_bucket_brigade *bb;
@@ -339,77 +324,297 @@ static int mod_websocket_read_block(request_rec *r, char *buffer, apr_size_t buf
 }
 
 /*
- * Decode a handshake key into its corresponding number and spaces.
+ * Base64-encode the SHA-1 hash of the client-supplied key with the WebSocket
+ * GUID appended to it.
  */
-static apr_uint32_t mod_websocket_decode(const char *key, int *spaces)
+static void mod_websocket_handshake(const struct _WebSocketServer *server, const char *key)
 {
-  apr_uint32_t number = 0;
-  int num_spaces = 0;
+  WebSocketState *state = server->state;
+  apr_byte_t response[32];
+  apr_byte_t digest[APR_SHA1_DIGESTSIZE];
+  apr_sha1_ctx_t context;
+  int len;
 
-  const char *ptr;
+  apr_sha1_init(&context);
+  apr_sha1_update(&context, key, strlen(key));
+  apr_sha1_update(&context, WEBSOCKET_GUID, WEBSOCKET_GUID_LEN);
+  apr_sha1_final(digest, &context);
 
-  for (ptr = key; *ptr != '\0'; ptr++) {
-    if ((*ptr >= '0') && (*ptr <= '9')) {
-      number = number*10 + (*ptr - '0');
-    } else if (*ptr == ' ') {
-      num_spaces++;
-    }
-  }
-  *spaces = num_spaces;
+  len = apr_base64_encode_binary((char *)response, digest, sizeof(digest));
+  response[len] = '\0';
 
-  return number;
+  apr_table_setn(state->r->headers_out, "Sec-WebSocket-Accept", apr_pstrdup(state->r->pool, (const char *)response));
 }
 
 /*
- * Pack a 32-bit number into its corresponding big-endian equivalent.
+ * The client-supplied WebSocket protocol entry consists of a list of
+ * client-side supported protocols. Parse the list, and create an array
+ * containing those protocol names.
  */
-static void mod_websocket_pack(apr_uint32_t number, unsigned char *packed)
+static void mod_websocket_parse_protocol(const WebSocketServer *server, const char *sec_websocket_protocol)
 {
-  packed[0] = (unsigned char)((number >> 24) & 0xFF);
-  packed[1] = (unsigned char)((number >> 16) & 0xFF);
-  packed[2] = (unsigned char)((number >>  8) & 0xFF);
-  packed[3] = (unsigned char)((number      ) & 0xFF);
+  WebSocketState *state = server->state;
+  apr_array_header_t *protocols = apr_array_make(state->r->pool, 1, sizeof(char *));
+  char *protocol_state = NULL;
+  char *protocol = apr_strtok(apr_pstrdup(state->r->pool, sec_websocket_protocol), ", \t", &protocol_state);
+
+  while (protocol != NULL) {
+    APR_ARRAY_PUSH(protocols, char *) = protocol;
+    protocol = apr_strtok(NULL, ", \t", &protocol_state);
+  }
+  if (!apr_is_empty_array(protocols)) {
+    state->protocols = protocols;
+  }
 }
+
+typedef struct _WebSocketFrameData {
+  apr_uint64_t application_data_offset;
+  unsigned char *application_data;
+  unsigned char fin;
+  unsigned char opcode;
+} WebSocketFrameData;
 
 /*
- * Determine the client challenge from three keys.
+ * The data framing handler requires that the server state mutex is locked by
+ * the caller upon entering this function. It will be locked when leaving too.
  */
-static int mod_websocket_challenge(const char *key1, const char *key2, const char *key3, unsigned char *challenge)
+static void mod_websocket_data_framing(const struct _WebSocketServer *server, websocket_config_rec *conf, void *plugin_private)
 {
-  int status = -1, spaces1 = 0, spaces2 = 0;
-  apr_uint32_t number1 = mod_websocket_decode(key1, &spaces1);
-  apr_uint32_t number2 = mod_websocket_decode(key2, &spaces2);
-  /*
-   * Make sure that the number of spaces is greater than 0, and that the number
-   * is an integral multiple of the number of spaces.
-   */
-  if ((spaces1 > 0) && ((number1 % spaces1) == 0) &&
-      (spaces2 > 0) && ((number2 % spaces2) == 0)) {
-    apr_uint32_t part1 = number1/spaces1;
-    apr_uint32_t part2 = number2/spaces2;
+  WebSocketState *state = server->state;
+  request_rec *r = state->r;
+  apr_bucket_brigade *obb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 
-    mod_websocket_pack(part1, challenge);
-    mod_websocket_pack(part2, challenge + 4);
-    memcpy(challenge + 8, key3, 8);
-    status = 0;
-  }
-  return status;
-}
+  if (obb != NULL) {
+    unsigned char block[BLOCK_DATA_SIZE];
+    apr_int64_t payload_limit = 33554432; /* Make this a user configurable setting -- FIXME */
+    apr_int64_t block_size;
+    apr_int64_t extension_bytes_remaining = 0;
+    apr_int64_t payload_length = 0;
+    apr_int64_t mask_offset = 0;
+    int framing_state = DATA_FRAMING_START;
+    int payload_length_bytes_remaining = 0;
+    int mask_index = 0, masking = 0;
+    unsigned char mask[4] = {0,0,0,0};
+    unsigned char fin = 0, opcode = 0xFF;
+    WebSocketFrameData control_frame = {0, NULL, 1, 8};
+    WebSocketFrameData message_frame = {0, NULL, 1, 0}, *frame = &control_frame;
 
-static int mod_websocket_handshake(const char *key1, const char *key2, const char *key3, unsigned char *response)
-{
-  int status = -1;
+    /* Allow the plugin to now write to the client */
+    state->obb = obb;
+    apr_thread_mutex_unlock(state->mutex);
 
-  if ((key1 != NULL) && (key2 != NULL) && (key3 != NULL) && (response != NULL)) {
-    unsigned char challenge[16] = {0};
+    while ((framing_state != DATA_FRAMING_CLOSE) &&
+           ((block_size = mod_websocket_read_block(r, (char *)block, sizeof(block))) > 0)) {
+      apr_int64_t block_offset = 0;
 
-    if (!(status = mod_websocket_challenge(key1, key2, key3, challenge))) {
-      if (apr_md5(response, challenge, (apr_size_t)sizeof(challenge)) == APR_SUCCESS) {
-        status = 0;
+      while (block_offset < block_size) {
+        switch (framing_state) {
+          case DATA_FRAMING_START:
+            /* Since we don't currently support any extensions, the reserve bits must be 0 */
+            if ((FRAME_GET_RSV1(block[block_offset]) != 0) ||
+                (FRAME_GET_RSV2(block[block_offset]) != 0) ||
+                (FRAME_GET_RSV3(block[block_offset]) != 0)) {
+              framing_state = DATA_FRAMING_CLOSE;
+              break;
+            }
+            fin = FRAME_GET_FIN(block[block_offset]);
+            opcode = FRAME_GET_OPCODE(block[block_offset++]);
+
+            framing_state = DATA_FRAMING_PAYLOAD_LENGTH;
+
+            if (opcode >= 0x8) { /* Control frame */
+              if (fin) {
+                frame = &control_frame;
+                frame->opcode = opcode;
+              } else {
+                framing_state = DATA_FRAMING_CLOSE;
+                break;
+              }
+            } else { /* Message frame */
+              frame = &message_frame;
+
+              if (opcode) {
+                if (frame->fin) {
+                  frame->opcode = opcode;
+                } else {
+                  framing_state = DATA_FRAMING_CLOSE;
+                  break;
+                }
+              } else if (frame->fin || ((opcode = frame->opcode) == 0)) {
+                framing_state = DATA_FRAMING_CLOSE;
+                break;
+              }
+              frame->fin = fin;
+            }
+
+            payload_length = 0;
+            payload_length_bytes_remaining = 0;
+
+            if (block_offset >= block_size) {
+              break; /* Only break if we need more data */
+            }
+          case DATA_FRAMING_PAYLOAD_LENGTH:
+            payload_length = (apr_int64_t)FRAME_GET_PAYLOAD_LEN(block[block_offset]);
+            masking = FRAME_GET_MASK(block[block_offset++]);
+
+            if (payload_length == 126) {
+              payload_length = 0;
+              payload_length_bytes_remaining = 2;
+            } else if (payload_length == 127) {
+              payload_length = 0;
+              payload_length_bytes_remaining = 8;
+            } else {
+              payload_length_bytes_remaining = 0;
+            }
+            if ((masking == 0) ||          /* Client-side mask is required */
+               ((opcode >= 0x8) &&         /* Control opcodes cannot have a */
+                (payload_length > 125))) { /* payload larger than 125 bytes */
+              framing_state = DATA_FRAMING_CLOSE;
+              break;
+            } else {
+              framing_state = DATA_FRAMING_PAYLOAD_LENGTH_EXT;
+            }
+            if (block_offset >= block_size) {
+              break; /* Only break if we need more data */
+            }
+          case DATA_FRAMING_PAYLOAD_LENGTH_EXT:
+            while ((payload_length_bytes_remaining > 0) && (block_offset < block_size)) {
+              payload_length *= 256;
+              payload_length += block[block_offset++];
+              payload_length_bytes_remaining--;
+            }
+            if (payload_length_bytes_remaining == 0) {
+              if ((payload_length < 0) || (payload_length > payload_limit)) {
+                /* Invalid payload length */
+                framing_state = DATA_FRAMING_CLOSE;
+                break;
+              } else if (masking != 0) {
+                framing_state = DATA_FRAMING_MASK;
+              } else {
+                framing_state = DATA_FRAMING_EXTENSION_DATA;
+                break;
+              }
+            }
+            if (block_offset >= block_size) {
+              break; /* Only break if we need more data */
+            }
+          case DATA_FRAMING_MASK:
+            while ((mask_index < 4) && (block_offset < block_size)) {
+              mask[mask_index++] = block[block_offset++];
+            }
+            if (mask_index == 4) {
+              framing_state = DATA_FRAMING_EXTENSION_DATA;
+              mask_offset = 0;
+              mask_index = 0;
+              if ((mask[0] == 0) && (mask[1] == 0) &&
+                  (mask[2] == 0) && (mask[3] == 0)) {
+                masking = 0;
+              }
+            } else {
+              break;
+            }
+            /* Fall through */
+          case DATA_FRAMING_EXTENSION_DATA:
+            /* Deal with extension data when we support them -- FIXME */
+            if (extension_bytes_remaining == 0) {
+              if (payload_length > 0) {
+                frame->application_data = (unsigned char *) realloc(frame->application_data, frame->application_data_offset + payload_length);
+                if (frame->application_data == NULL) {
+                  framing_state = DATA_FRAMING_CLOSE;
+                  break;
+                }
+              }
+              framing_state = DATA_FRAMING_APPLICATION_DATA;
+            }
+            /* Fall through */
+          case DATA_FRAMING_APPLICATION_DATA:
+            {
+              apr_int64_t block_data_length;
+              apr_int64_t block_length = 0;
+              apr_uint64_t application_data_offset = frame->application_data_offset;
+              unsigned char *application_data = frame->application_data;
+
+              block_length = block_size - block_offset;
+              block_data_length = (payload_length > block_length) ? block_length : payload_length;
+
+              if (masking) {
+                apr_int64_t i;
+
+                /* Optimize the unmasking -- FIXME */
+                for (i = 0; i < block_data_length; i++) {
+                  application_data[application_data_offset++] = block[block_offset++] ^ mask[mask_offset++ & 3];
+                }
+              } else if (block_data_length > 0) {
+                memmove(&application_data[application_data_offset], &block[block_offset], block_data_length);
+                application_data_offset += block_data_length;
+                block_offset += block_data_length;
+              }
+              payload_length -= block_data_length;
+
+              if (payload_length == 0) {
+                int message_type = MESSAGE_TYPE_INVALID;
+
+                switch (opcode) {
+                  case OPCODE_TEXT:
+                    message_type = MESSAGE_TYPE_TEXT;
+                    break;
+                  case OPCODE_BINARY:
+                    message_type = MESSAGE_TYPE_BINARY;
+                    break;
+                  case OPCODE_CLOSE:
+                    framing_state = DATA_FRAMING_CLOSE;
+                    break;
+                  case OPCODE_PING:
+                    /* Deal with extension data when we support them -- FIXME */
+                    mod_websocket_plugin_send(server, MESSAGE_TYPE_PONG, application_data, application_data_offset);
+                    break;
+                  case OPCODE_PONG:
+                    break;
+                  default:
+                    framing_state = DATA_FRAMING_CLOSE;
+                    break;
+                }
+                if (fin && (message_type != MESSAGE_TYPE_INVALID)) {
+                  conf->plugin->on_message(plugin_private, server, message_type,
+                                           application_data, application_data_offset);
+                }
+                if (framing_state != DATA_FRAMING_CLOSE) {
+                  framing_state = DATA_FRAMING_START;
+
+                  if (fin) {
+                    if (frame->application_data != NULL) {
+                      free(frame->application_data);
+                      frame->application_data = NULL;
+                    }
+                    application_data_offset = 0;
+                  }
+                }
+              }
+              frame->application_data_offset = application_data_offset;
+            }
+            break;
+          default:
+            framing_state = DATA_FRAMING_CLOSE;
+            block_offset = block_size;
+            break;
+        }
       }
     }
+    if (message_frame.application_data != NULL) {
+      free(message_frame.application_data);
+    }
+    if (control_frame.application_data != NULL) {
+      free(control_frame.application_data);
+    }
+
+    /* Send server-side closing handshake */
+    mod_websocket_plugin_send(server, MESSAGE_TYPE_CLOSE, NULL, 0);
+
+    /* We are done with the bucket brigade */
+    apr_thread_mutex_lock(state->mutex);
+    state->obb = NULL;
+    apr_brigade_destroy(obb);
   }
-  return status;
 }
 
 /*
@@ -423,286 +628,104 @@ static int mod_websocket_method_handler(request_rec *r)
   if ((strcmp(r->handler, "websocket-handler") == 0) &&
       (r->method_number == M_GET) && (r->parsed_uri.path != NULL) && (r->headers_in != NULL)) {
     const char *upgrade = apr_table_get(r->headers_in, "Upgrade");
+    const char *connection = apr_table_get(r->headers_in, "Connection");
 
-    if ((upgrade != NULL) && !strcasecmp(upgrade, "WebSocket")) {
+    if ((upgrade != NULL) &&
+        (connection != NULL) &&
+        !strcasecmp(upgrade, "WebSocket") &&
+        !strcasecmp(connection, "Upgrade")) {
       /* Need to serialize the connections to minimize a denial of service attack -- FIXME */
 
-      const char *connection = apr_table_get(r->headers_in, "Connection");
-      const char *sec_websocket_key1 = apr_table_get(r->headers_in, "Sec-WebSocket-Key1");
-      const char *sec_websocket_key2 = apr_table_get(r->headers_in, "Sec-WebSocket-Key2");
+      const char *host = apr_table_get(r->headers_in, "Host");
+      const char *sec_websocket_key = apr_table_get(r->headers_in, "Sec-WebSocket-Key");
+      const char *sec_websocket_origin = apr_table_get(r->headers_in, "Sec-WebSocket-Origin");
+      const char *sec_websocket_version = apr_table_get(r->headers_in, "Sec-WebSocket-Version");
 
-      if ((connection != NULL) && !strcasecmp(connection, "Upgrade")) {
+      if ((host != NULL) &&
+          (sec_websocket_key != NULL) &&
+          (sec_websocket_origin != NULL) &&
+          (sec_websocket_version != NULL) &&
+          !strcasecmp(sec_websocket_version, "7")) { // Draft 7
+        /* We need to validate the Host and Sec-WebSocket-Origin -- FIXME */
+
         websocket_config_rec *conf = (websocket_config_rec *) ap_get_module_config(r->per_dir_config, &websocket_module);
 
         if ((conf != NULL) && (conf->plugin != NULL)) {
-          int using_draft75;
+          WebSocketState state = {r, NULL, NULL, NULL, 0};
+          WebSocketServer server = {
+            sizeof(WebSocketServer), 1, &state,
+            mod_websocket_request, mod_websocket_header_get, mod_websocket_header_set,
+            mod_websocket_protocol_count, mod_websocket_protocol_index, mod_websocket_protocol_set,
+            mod_websocket_plugin_send, mod_websocket_plugin_close
+          };
+          const char *sec_websocket_protocol = apr_table_get(r->headers_in, "Sec-WebSocket-Protocol");
+          void *plugin_private = NULL;
+          ap_filter_t *input_filter;
 
-          if ((sec_websocket_key1 != NULL) &&
-              (sec_websocket_key2 != NULL)) {
-            using_draft75 = 0;
-          } else if (conf->support_draft75) {
-            /* Draft-75 (use 4 so we can easily skip past the four bytes of "Sec-" when creating the output header) */
-            using_draft75 = 4;
-          } else {
-            /* Invalid */
-            using_draft75 = -1;
-          }
-          if (using_draft75 != -1) {
-            const char *host = apr_table_get(r->headers_in, "Host"); /* Verify -- FIXME */
-            const char *origin = apr_table_get(r->headers_in, "Origin"); /* Verify -- FIXME */
-            const char *sec_websocket_protocol = apr_table_get(r->headers_in, "Sec-WebSocket-Protocol" + using_draft75);
-            char sec_websocket_key3[8] = {0};
-            ap_filter_t *input_filter = r->input_filters, *http_filter = NULL;
-            int expected_filters = 2;
-            int secure = 0;
-
-            /*
-             * Since we are handling a WebSocket connection, not a standard HTTP
-             * connection, remove the HTTP input filter. Also, see if we are
-             * communicating over a secure connection (is there a better way?).
-             */
-            while ((input_filter != NULL) && (expected_filters > 0)) {
-              if ((input_filter->frec != NULL) &&
-                  (input_filter->frec->name != NULL)) {
-                if (!strcasecmp(input_filter->frec->name, "http_in")) {
-                  http_filter = input_filter;
-                  expected_filters--;
-                } else if (!strcasecmp(input_filter->frec->name, "ssl/tls filter")) {
-                  secure = 1;
-                  expected_filters--;
-                }
-              }
-              input_filter = input_filter->next;
-            }
-            if (http_filter) {
-              ap_remove_input_filter(http_filter);
-            }
-
-            /* Key3 is provided in the content body. */
-            if (using_draft75 || (mod_websocket_read_block(r, sec_websocket_key3, 8) == 8)) {
-              unsigned char response[APR_MD5_DIGESTSIZE];
-
-              if (using_draft75 || !mod_websocket_handshake(sec_websocket_key1, sec_websocket_key2, sec_websocket_key3, response)) {
-                WebSocketState state = {r, NULL, NULL, NULL, 0, using_draft75};
-                WebSocketServer server = {
-                  sizeof(WebSocketServer), 1, &state, mod_websocket_request, mod_websocket_header_get, mod_websocket_header_set,
-                  mod_websocket_protocol_count, mod_websocket_protocol_index, mod_websocket_protocol_set, NULL, NULL
-                };
-                const char *location = apr_pstrcat(r->pool, (secure ? "wss://" : "ws://"), host, r->parsed_uri.path, NULL);
-                void *plugin_private = NULL;
-
-                apr_table_clear(r->headers_out);
-                apr_table_setn(r->headers_out, "Upgrade", "WebSocket");
-                apr_table_setn(r->headers_out, "Connection", "Upgrade");
-                apr_table_setn(r->headers_out, "Sec-WebSocket-Location" + using_draft75, location);
-                if (origin != NULL) {
-                  apr_table_setn(r->headers_out, "Sec-WebSocket-Origin" + using_draft75, origin);
-                }
-
-                /* Handle the WebSocket protocol */
-                if (sec_websocket_protocol != NULL) {
-                  /* Parse the WebSocket protocol entry */
-                  mod_websocket_parse_protocol(&server, sec_websocket_protocol);
-
-                  if (mod_websocket_protocol_count(&server) > 0) {
-                    /* Default to using the first protocol in the list (plugin may be overide this in on_connect) */
-                    mod_websocket_protocol_set(&server, mod_websocket_protocol_index(&server, 0));
-                  }
-                }
-
-                /* If the plugin supplies an on_connect function, it must return non-null on success */
-                if ((conf->plugin->on_connect == NULL) ||
-                    ((plugin_private = conf->plugin->on_connect(&server)) != NULL)) {
-                  apr_bucket_brigade *obb;
-
-                  /* Now that the connection has been established, disable the socket timeout */
-                  apr_socket_timeout_set(ap_get_module_config(r->connection->conn_config, &core_module), -1);
-
-                  apr_thread_mutex_create(&state.mutex, APR_THREAD_MUTEX_DEFAULT, r->pool);
-
-                  apr_thread_mutex_lock(state.mutex);
-
-                  /* Enable the plugin send/close functions */
-                  server.send = mod_websocket_plugin_send;
-                  server.close = mod_websocket_plugin_close;
-
-                  /* Set response status code and status line */
-                  r->status = 101;
-                  r->status_line = using_draft75 ? "101 Web Socket Protocol Handshake" : "101 WebSocket Protocol Handshake";
-
-                  /* Send the headers */
-                  ap_send_interim_response(r, 1);
-
-                  /* Create the output bucket brigade */
-                  obb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-
-                  if (obb != NULL) {
-                    unsigned char block[BLOCK_DATA_SIZE], *extended_data = NULL;
-                    apr_off_t extended_data_offset = 0;
-                    apr_size_t block_size, data_length = 0, extended_data_size = 0;
-                    apr_size_t data_limit = 33554432; /* Make this a user configurable setting -- FIXME */
-                    int framing_state = DATA_FRAMING_READ_TYPE, type = -1;
-                    ap_filter_t *of = r->connection->output_filters;
-
-                    if (!using_draft75) {
-                      /* Write the handshake response */
-                      ap_fwrite(of, obb, (const char *)response, (apr_size_t)sizeof(response));
-                      ap_fflush(of, obb);
-                    }
-
-                    /* Allow the plugin to now write to the client */
-                    state.obb = obb;
-                    apr_thread_mutex_unlock(state.mutex);
-
-                    while ((framing_state != DATA_FRAMING_CLOSE) &&
-                           ((block_size = mod_websocket_read_block(r, (char *)block, sizeof(block))) > 0)) {
-                      apr_off_t block_offset = 0, block_data_offset = 0;
-                      apr_size_t block_length = 0;
-
-                      while (block_offset < block_size) {
-                        switch (framing_state) {
-                          case DATA_FRAMING_READ_TYPE:
-                            type = (int)block[block_offset];
-                            framing_state = (type & 0x80) ? DATA_FRAMING_IN_BINARY_LENGTH : DATA_FRAMING_IN_TEXT_DATA;
-                            block_data_offset = ++block_offset;
-                            data_length = 0;
-                            break;
-                          case DATA_FRAMING_IN_TEXT_DATA:
-                            while (block_offset < block_size) {
-                              if (block[block_offset++] == 0xFF) { /* End of data */
-                                unsigned char *message;
-
-                                block_length = (apr_size_t)(block_offset - block_data_offset - 1);
-                                data_length += block_length;
-
-                                if (extended_data_offset > 0) {
-                                  memmove(&extended_data[extended_data_offset], &block[block_data_offset], block_length);
-                                  extended_data_offset = 0;
-                                  message = extended_data;
-                                } else {
-                                  message = &block[block_data_offset];
-                                }
-                                conf->plugin->on_message(plugin_private, &server, type, message, data_length);
-                                type = -1;
-                                framing_state = DATA_FRAMING_READ_TYPE;
-                                break;
-                              }
-                            }
-                            if (framing_state == DATA_FRAMING_IN_TEXT_DATA) {
-                              /* The data spans blocks */
-                              unsigned char *previous_extended_data = extended_data;
-
-                              block_length = (apr_size_t)(block_offset - block_data_offset);
-                              data_length += block_length;
-                              /*
-                               * If the new block data will extended past the end
-                               * of the extended buffer, increase it. Include the
-                               * size of an additional block in the calculation
-                               * so that we will always have enough room in the
-                               * extended buffer when we reach an end-of-data
-                               * marker.
-                               */
-                              if ((extended_data_offset + block_length + BLOCK_DATA_SIZE) > extended_data_size) {
-                                extended_data_size += EXTENDED_DATA_SIZE;
-                                extended_data = (unsigned char *) realloc(extended_data, extended_data_size*sizeof(unsigned char));
-                              }
-                              if (extended_data != NULL) {
-                                memmove(&extended_data[extended_data_offset], &block[block_data_offset], block_length);
-                                extended_data_offset += block_length;
-                              } else {
-                                /* The memory allocation failed, close the connection */
-                                if (previous_extended_data != NULL) {
-                                  free(previous_extended_data);
-                                }
-                                framing_state = DATA_FRAMING_CLOSE;
-                              }
-                            }
-                            break;
-                          case DATA_FRAMING_IN_BINARY_DATA:
-                            /* Handle binary data frames */
-                            if (extended_data != NULL) {
-                              apr_size_t block_data_length;
-
-                              block_length = (apr_size_t)(block_size - block_offset);
-                              block_data_length = (data_length > block_length) ? block_length : data_length;
-                              memmove(&extended_data[extended_data_offset], &block[block_offset], block_data_length);
-                              extended_data_offset += block_data_length;
-                              block_offset += block_data_length;
-                              data_length -= block_data_length;
-
-                              if (data_length == 0) {
-                                /*
-                                 * Binary data frames aren't supported by the
-                                 * specification, so don't pass them on to the
-                                 * plugin. Just silently discard the data.
-                                 *
-                                 * conf->plugin->on_message(plugin_private, &server, type, extended_data, extended_data_offset);
-                                 */
-                                extended_data_offset = 0;
-                                type = -1;
-                                framing_state = DATA_FRAMING_READ_TYPE;
-                              }
-                            } else {
-                              framing_state = DATA_FRAMING_CLOSE;
-                            }
-                            break;
-                          case DATA_FRAMING_IN_BINARY_LENGTH:
-                            data_length = data_length*128 + (block[block_offset] & 0x7F);
-
-                            if (data_length > data_limit) {
-                              /* Exceeded implementation-specific limit */
-                              framing_state = DATA_FRAMING_CLOSE;
-                            } else if ((block[block_offset] & 0x80) == 0) {
-                              /* Encountered end-of-length marker */
-                              if (data_length == 0) {
-                                framing_state = ((type == 0xFF) && !using_draft75) ? DATA_FRAMING_CLOSE : DATA_FRAMING_READ_TYPE;
-                              } else {
-                                /* Always use the extended data to handle binary content */
-                                if (data_length > extended_data_size) {
-                                  extended_data_size = data_length;
-                                  extended_data = (unsigned char *) realloc(extended_data, extended_data_size*sizeof(unsigned char));
-                                }
-                                extended_data_offset = 0;
-                                framing_state = DATA_FRAMING_IN_BINARY_DATA;
-                              }
-                            }
-                            block_offset++;
-                            break;
-                          default:
-                            break;
-                        }
-                      }
-                    }
-                    if (extended_data != NULL) {
-                      free(extended_data);
-                    }
-
-                    /* Send server-side closing handshake */
-                    mod_websocket_plugin_send(&server, 0xFF, NULL, 0);
-
-                    /* Disallow the plugin from writing to the client */
-                    apr_thread_mutex_lock(state.mutex);
-                    state.obb = NULL;
-
-                    apr_brigade_destroy(obb);
-                  }
-                  apr_thread_mutex_unlock(state.mutex);
-
-                  /* Tell the plugin that we are disconnecting */
-                  if (conf->plugin->on_disconnect != NULL) {
-                    conf->plugin->on_disconnect(plugin_private, &server);
-                  }
-
-                  /* Close the connection (in case it isn't closed yet) */
-                  r->connection->keepalive = AP_CONN_CLOSE;
-
-                  apr_thread_mutex_destroy(state.mutex);
-
-                  return OK;
-                }
-              }
+          /*
+           * Since we are handling a WebSocket connection, not a standard HTTP
+           * connection, remove the HTTP input filter.
+           */
+          for (input_filter = r->input_filters; input_filter != NULL; input_filter = input_filter->next) {
+            if ((input_filter->frec != NULL) &&
+                (input_filter->frec->name != NULL) &&
+                !strcasecmp(input_filter->frec->name, "http_in")) {
+              ap_remove_input_filter(input_filter);
+              break;
             }
           }
+
+          apr_table_clear(r->headers_out);
+          apr_table_setn(r->headers_out, "Upgrade", "websocket");
+          apr_table_setn(r->headers_out, "Connection", "Upgrade");
+
+          /* Set the expected acceptance response */
+          mod_websocket_handshake(&server, sec_websocket_key);
+
+          /* Handle the WebSocket protocol */
+          if (sec_websocket_protocol != NULL) {
+            /* Parse the WebSocket protocol entry */
+            mod_websocket_parse_protocol(&server, sec_websocket_protocol);
+
+            if (mod_websocket_protocol_count(&server) > 0) {
+              /* Default to using the first protocol in the list (plugin should overide this in on_connect) */
+              mod_websocket_protocol_set(&server, mod_websocket_protocol_index(&server, 0));
+            }
+          }
+
+          apr_thread_mutex_create(&state.mutex, APR_THREAD_MUTEX_DEFAULT, r->pool);
+          apr_thread_mutex_lock(state.mutex);
+
+          /* If the plugin supplies an on_connect function, it must return non-null on success */
+          if ((conf->plugin->on_connect == NULL) ||
+              ((plugin_private = conf->plugin->on_connect(&server)) != NULL)) {
+            /* Now that the connection has been established, disable the socket timeout */
+            apr_socket_timeout_set(ap_get_module_config(r->connection->conn_config, &core_module), -1);
+
+            /* Set response status code and status line */
+            r->status = 101;
+            r->status_line = "101 Switching Protocols";
+
+            /* Send the headers */
+            ap_send_interim_response(r, 1);
+
+            /* The main data framing loop */
+            mod_websocket_data_framing(&server, conf, plugin_private);
+
+            apr_thread_mutex_unlock(state.mutex);
+
+            /* Tell the plugin that we are disconnecting */
+            if (conf->plugin->on_disconnect != NULL) {
+              conf->plugin->on_disconnect(plugin_private, &server);
+            }
+
+            /* Close the connection */
+            r->connection->keepalive = AP_CONN_CLOSE;
+            ap_lingering_close(r->connection);
+          }
+          apr_thread_mutex_destroy(state.mutex);
+
+          return OK;
         }
       }
     }
@@ -714,8 +737,6 @@ static const command_rec websocket_cmds[] =
 {
   AP_INIT_TAKE2("WebSocketHandler", mod_websocket_conf_handler, NULL, OR_AUTHCFG,
       "Shared library containing WebSocket implementation followed by function initialization function name"),
-  AP_INIT_FLAG("SupportDraft75", ap_set_flag_slot, (void*)APR_OFFSETOF(websocket_config_rec, support_draft75), OR_AUTHCFG,
-      "Support Draft-75 WebSocket Protocol"),
   {NULL}
 };
 

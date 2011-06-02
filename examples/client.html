@@ -7,7 +7,7 @@
       var ws;
 
       function init() {
-        ws = new WebSocket("ws://localhost/echo");
+        ws = new WebSocket(((window.location.protocol == "https:") ? "wss:" : "ws:") + "//" + window.location.host + "/echo");
         ws.onopen = function(event) {
           document.getElementById("main").style.visibility = "visible";
           document.getElementById("connected").innerText = "Connected to WebSocket server";

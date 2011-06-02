@@ -1,5 +1,5 @@
 /*
- * Copyright 2010 self.disconnect
+ * Copyright 2010-2011 self.disconnect
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,13 @@ extern "C" {
 #define CALLBACK
 #endif
 
+#define MESSAGE_TYPE_INVALID  -1
+#define MESSAGE_TYPE_TEXT      0
+#define MESSAGE_TYPE_BINARY  128
+#define MESSAGE_TYPE_CLOSE   255
+#define MESSAGE_TYPE_PING    256
+#define MESSAGE_TYPE_PONG    257
+
 struct _WebSocketServer;
 
 typedef struct request_rec *(CALLBACK *WS_Request)(const struct _WebSocketServer *server);
@@ -41,6 +48,8 @@ typedef const char *(CALLBACK *WS_Protocol_Index)(const struct _WebSocketServer 
 typedef void (CALLBACK *WS_Protocol_Set)(const struct _WebSocketServer *server, const char *protocol);
 typedef size_t (CALLBACK *WS_Send)(const struct _WebSocketServer *server, const int type, const unsigned char *buffer, const size_t buffer_size);
 typedef void (CALLBACK *WS_Close)(const struct _WebSocketServer *server);
+
+#define WEBSOCKET_SERVER_VERSION_1 1
 
 typedef struct _WebSocketServer {
   unsigned int size;
@@ -64,6 +73,8 @@ typedef void (CALLBACK *WS_Destroy)(struct _WebSocketPlugin *plugin);
 typedef void *(CALLBACK *WS_OnConnect)(const WebSocketServer *server); /* Returns plugin_private */
 typedef size_t (CALLBACK *WS_OnMessage)(void *plugin_private, const WebSocketServer *server, const int type, unsigned char *buffer, const size_t buffer_size);
 typedef void (CALLBACK *WS_OnDisconnect)(void *plugin_private, const WebSocketServer *server);
+
+#define WEBSOCKET_PLUGIN_VERSION_0 0
 
 typedef struct _WebSocketPlugin {
   unsigned int size;

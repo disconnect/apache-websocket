@@ -16,6 +16,7 @@ if env["PLATFORM"] == "win32":
                CPPPATH = [".."],
                SHLINKCOM=["mt.exe -nologo -manifest ${TARGET}.manifest -outputresource:$TARGET;2"])
     env.SideEffect(["mod_websocket_echo.so.manifest", "mod_websocket_echo.exp", "mod_websocket_echo.lib"], "mod_websocket_echo.so")
+    env.SideEffect(["mod_websocket_dumb_increment.so.manifest", "mod_websocket_dumb_increment.exp", "mod_websocket_dumb_increment.lib"], "mod_websocket_dumb_increment.so")
 
     env["no_import_lib"] = "true"
 
@@ -29,16 +30,23 @@ else:
         env.Append(CCFLAGS = ["-O2"])
     if env["PLATFORM"] == "darwin":
         env.Append(CPPDEFINES = ["DARWIN", "SIGPROCMASK_SETS_THREAD_MASK"],
+                   CPPPATH = ["/usr/include/apache2", "/usr/include/apr-1"],
                    SHLINKFLAGS = "-undefined dynamic_lookup")
         modulesdir = "/usr/libexec/apache2"
     else:
-        modulesdir = "" # FIXME
+        env.Append(CPPDEFINES = ["LINUX=2", "_FORTIFY_SOURCE=2", "_GNU_SOURCE", "_LARGEFILE64_SOURCE", "_REENTRANT"],
+                   CPPPATH = ["/usr/include/apache2", "/usr/include/apr-1.0"])
+        modulesdir = "/usr/lib/apache2/modules"
 
 echo = env.SharedLibrary(source=["mod_websocket_echo.c"],
                          SHLIBPREFIX="",
                          SHLIBSUFFIX=".so")
 
-env.Install(dir=modulesdir, source=echo)
+dumb_increment = env.SharedLibrary(source=["mod_websocket_dumb_increment.c"],
+                         SHLIBPREFIX="",
+                         SHLIBSUFFIX=".so")
+
+env.Install(dir=modulesdir, source=[echo, dumb_increment])
 
 # Install
 
