@@ -13,7 +13,10 @@ if env["PLATFORM"] == "win32":
     else:
         env.Append(CCFLAGS = ["/O2", "/MD"])
     env.Append(CCFLAGS = ["/EHsc", "/W3"],
-               CPPPATH = [".."],
+               CPPDEFINES = ["WIN32"],
+               CPPPATH = ["..", apachedir+"/include"],
+               LIBPATH = [apachedir+"/lib"],
+               LIBS = ["libapr-1.lib"],
                SHLINKCOM=["mt.exe -nologo -manifest ${TARGET}.manifest -outputresource:$TARGET;2"])
     env.SideEffect(["mod_websocket_echo.so.manifest", "mod_websocket_echo.exp", "mod_websocket_echo.lib"], "mod_websocket_echo.so")
     env.SideEffect(["mod_websocket_dumb_increment.so.manifest", "mod_websocket_dumb_increment.exp", "mod_websocket_dumb_increment.lib"], "mod_websocket_dumb_increment.so")
