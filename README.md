@@ -5,11 +5,11 @@ requests using the WebSocket protocol. The module consists of a plugin
 architecture for handling WebSocket messaging. Doing so does _not_ require any
 knowledge of internal Apache structures.
 
-This implementation supports draft-07 along with the older draft-76 of the
-WebSocket protocol. Support for draft-75 is disabled by default, but it may be
-enabled through the draft-76 module configuration.
+This implementation supports draft-07 through draft-10, and the older draft-76
+of the WebSocket protocol. Support for draft-75 is disabled by default, but it
+may be enabled through the draft-76 module configuration.
 
-Due to the extensive differences between the draft-07 and draft-76
+Due to the extensive differences between the newer drafts and draft-76
 implementations, and because of the Apache module architecture, two separate
 modules are used to support the different protocols.
 
@@ -114,22 +114,24 @@ server will initialize the module by calling the `echo_init` function in
     LoadModule websocket_draft76_module   libexec/apache2/mod_websocket_draft76.so
 
     <IfModule mod_websocket.c>
-      SetHandler websocket-handler
       <Location /echo>
+        SetHandler websocket-handler
         WebSocketHandler libexec/apache2/mod_websocket_echo.so echo_init
       </Location>
       <Location /dumb-increment>
+        SetHandler websocket-handler
         WebSocketHandler libexec/apache2/mod_websocket_dumb_increment.so dumb_increment_init
       </Location>
     </IfModule>
 
     <IfModule mod_websocket_draft76.c>
-      SetHandler websocket-handler
       <Location /echo>
+        SetHandler websocket-handler
         WebSocketHandler libexec/apache2/mod_websocket_echo.so echo_init
         SupportDraft75 On
       </Location>
       <Location /dumb-increment>
+        SetHandler websocket-handler
         WebSocketHandler libexec/apache2/mod_websocket_dumb_increment.so dumb_increment_init
         SupportDraft75 On
       </Location>
@@ -152,15 +154,15 @@ module is different from Mac OS X, the configuration will look more like this:
     LoadModule websocket_draft76_module   /usr/lib/apache2/modules/mod_websocket_draft76.so
 
     <IfModule mod_websocket.c>
-      SetHandler websocket-handler
       <Location /echo>
+        SetHandler websocket-handler
         WebSocketHandler /usr/lib/apache2/modules/mod_websocket_echo.so echo_init
       </Location>
     </IfModule>
 
     <IfModule mod_websocket_draft76.c>
-      SetHandler websocket-handler
       <Location /echo>
+        SetHandler websocket-handler
         WebSocketHandler /usr/lib/apache2/modules/mod_websocket_echo.so echo_init
         SupportDraft75 On
       </Location>
@@ -176,15 +178,15 @@ is using the `__stdcall` calling convention:
     LoadModule websocket_draft76_module   modules/mod_websocket_draft76.so
 
     <IfModule mod_websocket.c>
-      SetHandler websocket-handler
       <Location /echo>
+        SetHandler websocket-handler
         WebSocketHandler modules/mod_websocket_echo.so _echo_init@0
       </Location>
     </IfModule>
 
     <IfModule mod_websocket_draft76.c>
-      SetHandler websocket-handler
       <Location /echo>
+        SetHandler websocket-handler
         WebSocketHandler modules/mod_websocket_echo.so _echo_init@0
         SupportDraft75 On
       </Location>
@@ -198,8 +200,8 @@ example configuration could look under Mac OS X after removing the the
     LoadModule websocket_module   libexec/apache2/mod_websocket.so
 
     <IfModule mod_websocket.c>
-      SetHandler websocket-handler
       <Location /echo>
+        SetHandler websocket-handler
         WebSocketHandler libexec/apache2/mod_websocket_echo.so echo_init
       </Location>
     </IfModule>

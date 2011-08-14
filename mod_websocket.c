@@ -79,6 +79,13 @@ typedef struct {
 #define WEBSOCKET_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WEBSOCKET_GUID_LEN 36
 
+#define STATUS_CODE_OK               1000
+#define STATUS_CODE_GOING_AWAY       1001
+#define STATUS_CODE_PROTOCOL_ERROR   1002
+#define STATUS_CODE_UNSUPPORTED_TYPE 1003
+#define STATUS_CODE_FRAME_TOO_LARGE  1004
+#define STATUS_CODE_OUT_OF_MEMORY    STATUS_CODE_GOING_AWAY
+
 /*
  * Configuration
  */
@@ -386,7 +393,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
 
   if (obb != NULL) {
     unsigned char block[BLOCK_DATA_SIZE];
-    apr_int64_t payload_limit = 33554432; /* Make this a user configurable setting -- FIXME */
+    apr_int64_t payload_limit = 32*1024*1024; /* Make this a user configurable setting -- FIXME */
     apr_int64_t block_size;
     apr_int64_t extension_bytes_remaining = 0;
     apr_int64_t payload_length = 0;
@@ -398,6 +405,8 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
     unsigned char fin = 0, opcode = 0xFF;
     WebSocketFrameData control_frame = {0, NULL, 1, 8};
     WebSocketFrameData message_frame = {0, NULL, 1, 0}, *frame = &control_frame;
+    unsigned short status_code = STATUS_CODE_OK;
+    unsigned char status_code_buffer[2];
 
     /* Allow the plugin to now write to the client */
     state->obb = obb;
@@ -415,6 +424,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                 (FRAME_GET_RSV2(block[block_offset]) != 0) ||
                 (FRAME_GET_RSV3(block[block_offset]) != 0)) {
               framing_state = DATA_FRAMING_CLOSE;
+              status_code = STATUS_CODE_PROTOCOL_ERROR;
               break;
             }
             fin = FRAME_GET_FIN(block[block_offset]);
@@ -428,6 +438,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                 frame->opcode = opcode;
               } else {
                 framing_state = DATA_FRAMING_CLOSE;
+                status_code = STATUS_CODE_PROTOCOL_ERROR;
                 break;
               }
             } else { /* Message frame */
@@ -438,10 +449,12 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                   frame->opcode = opcode;
                 } else {
                   framing_state = DATA_FRAMING_CLOSE;
+                  status_code = STATUS_CODE_PROTOCOL_ERROR;
                   break;
                 }
               } else if (frame->fin || ((opcode = frame->opcode) == 0)) {
                 framing_state = DATA_FRAMING_CLOSE;
+                status_code = STATUS_CODE_PROTOCOL_ERROR;
                 break;
               }
               frame->fin = fin;
@@ -470,6 +483,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                ((opcode >= 0x8) &&         /* Control opcodes cannot have a */
                 (payload_length > 125))) { /* payload larger than 125 bytes */
               framing_state = DATA_FRAMING_CLOSE;
+              status_code = STATUS_CODE_PROTOCOL_ERROR;
               break;
             } else {
               framing_state = DATA_FRAMING_PAYLOAD_LENGTH_EXT;
@@ -487,6 +501,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               if ((payload_length < 0) || (payload_length > payload_limit)) {
                 /* Invalid payload length */
                 framing_state = DATA_FRAMING_CLOSE;
+                status_code = STATUS_CODE_FRAME_TOO_LARGE; /* Actually message too large -- FIXME */
                 break;
               } else if (masking != 0) {
                 framing_state = DATA_FRAMING_MASK;
@@ -521,6 +536,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                 frame->application_data = (unsigned char *) realloc(frame->application_data, frame->application_data_offset + payload_length);
                 if (frame->application_data == NULL) {
                   framing_state = DATA_FRAMING_CLOSE;
+                  status_code = STATUS_CODE_OUT_OF_MEMORY;
                   break;
                 }
               }
@@ -540,7 +556,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               if (masking) {
                 apr_int64_t i;
 
-                /* Optimize the unmasking -- FIXME */
+                /* Need to optimize the unmasking -- FIXME */
                 for (i = 0; i < block_data_length; i++) {
                   application_data[application_data_offset++] = block[block_offset++] ^ mask[mask_offset++ & 3];
                 }
@@ -563,15 +579,16 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                     break;
                   case OPCODE_CLOSE:
                     framing_state = DATA_FRAMING_CLOSE;
+                    status_code = STATUS_CODE_OK;
                     break;
                   case OPCODE_PING:
-                    /* Deal with extension data when we support them -- FIXME */
                     mod_websocket_plugin_send(server, MESSAGE_TYPE_PONG, application_data, application_data_offset);
                     break;
                   case OPCODE_PONG:
                     break;
                   default:
                     framing_state = DATA_FRAMING_CLOSE;
+                    status_code = STATUS_CODE_UNSUPPORTED_TYPE;
                     break;
                 }
                 if (fin && (message_type != MESSAGE_TYPE_INVALID)) {
@@ -595,6 +612,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
             break;
           default:
             framing_state = DATA_FRAMING_CLOSE;
+            status_code = STATUS_CODE_PROTOCOL_ERROR;
             block_offset = block_size;
             break;
         }
@@ -608,7 +626,9 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
     }
 
     /* Send server-side closing handshake */
-    mod_websocket_plugin_send(server, MESSAGE_TYPE_CLOSE, NULL, 0);
+    status_code_buffer[0] = (status_code >> 8) & 0xFF;
+    status_code_buffer[1] =  status_code       & 0xFF;
+    mod_websocket_plugin_send(server, MESSAGE_TYPE_CLOSE, status_code_buffer, sizeof(status_code_buffer));
 
     /* We are done with the bucket brigade */
     apr_thread_mutex_lock(state->mutex);
@@ -645,7 +665,9 @@ static int mod_websocket_method_handler(request_rec *r)
           (sec_websocket_key != NULL) &&
           (sec_websocket_origin != NULL) &&
           (sec_websocket_version != NULL) &&
-          !strcasecmp(sec_websocket_version, "7")) { // Draft 7
+         ((sec_websocket_version[0] == '7') ||  /* Protocol 7 */
+          (sec_websocket_version[0] == '8')) && /* Protocol 8 */
+          (sec_websocket_version[1] == '\0')) {
         /* We need to validate the Host and Sec-WebSocket-Origin -- FIXME */
 
         websocket_config_rec *conf = (websocket_config_rec *) ap_get_module_config(r->per_dir_config, &websocket_module);
@@ -703,8 +725,8 @@ static int mod_websocket_method_handler(request_rec *r)
             apr_socket_timeout_set(ap_get_module_config(r->connection->conn_config, &core_module), -1);
 
             /* Set response status code and status line */
-            r->status = 101;
-            r->status_line = "101 Switching Protocols";
+            r->status = HTTP_SWITCHING_PROTOCOLS;
+            r->status_line = ap_get_status_line(r->status);
 
             /* Send the headers */
             ap_send_interim_response(r, 1);
@@ -718,11 +740,23 @@ static int mod_websocket_method_handler(request_rec *r)
             if (conf->plugin->on_disconnect != NULL) {
               conf->plugin->on_disconnect(plugin_private, &server);
             }
-
-            /* Close the connection */
             r->connection->keepalive = AP_CONN_CLOSE;
-            ap_lingering_close(r->connection);
+          } else {
+            apr_table_clear(r->headers_out);
+
+            /* The connection has been refused */
+            r->status = HTTP_FORBIDDEN;
+            r->status_line = ap_get_status_line(r->status);
+            r->header_only = 1;
+            r->connection->keepalive = AP_CONN_CLOSE;
+
+            ap_send_error_response(r, 0);
+
+            apr_thread_mutex_unlock(state.mutex);
           }
+          /* Close the connection */
+          ap_lingering_close(r->connection);
+
           apr_thread_mutex_destroy(state.mutex);
 
           return OK;
