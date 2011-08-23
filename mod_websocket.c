@@ -481,7 +481,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
             }
             if ((masking == 0) ||          /* Client-side mask is required */
                ((opcode >= 0x8) &&         /* Control opcodes cannot have a */
-                (payload_length > 125))) { /* payload larger than 125 bytes */
+                (payload_length_bytes_remaining != 0))) { /* payload larger than 125 bytes */
               framing_state = DATA_FRAMING_CLOSE;
               status_code = STATUS_CODE_PROTOCOL_ERROR;
               break;
@@ -658,16 +658,15 @@ static int mod_websocket_method_handler(request_rec *r)
 
       const char *host = apr_table_get(r->headers_in, "Host");
       const char *sec_websocket_key = apr_table_get(r->headers_in, "Sec-WebSocket-Key");
-      const char *sec_websocket_origin = apr_table_get(r->headers_in, "Sec-WebSocket-Origin");
       const char *sec_websocket_version = apr_table_get(r->headers_in, "Sec-WebSocket-Version");
 
       if ((host != NULL) &&
           (sec_websocket_key != NULL) &&
-          (sec_websocket_origin != NULL) &&
           (sec_websocket_version != NULL) &&
          ((sec_websocket_version[0] == '7') ||  /* Protocol 7 */
           (sec_websocket_version[0] == '8')) && /* Protocol 8 */
           (sec_websocket_version[1] == '\0')) {
+        /* const char *sec_websocket_origin = apr_table_get(r->headers_in, "Sec-WebSocket-Origin"); */
         /* We need to validate the Host and Sec-WebSocket-Origin -- FIXME */
 
         websocket_config_rec *conf = (websocket_config_rec *) ap_get_module_config(r->per_dir_config, &websocket_module);
