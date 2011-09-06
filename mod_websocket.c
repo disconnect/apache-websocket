@@ -44,6 +44,7 @@ typedef struct {
   char *location;
   apr_dso_handle_t *res_handle;
   WebSocketPlugin *plugin;
+  apr_int64_t payload_limit;
 } websocket_config_rec;
 
 #define BLOCK_DATA_SIZE              4096
@@ -79,12 +80,14 @@ typedef struct {
 #define WEBSOCKET_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WEBSOCKET_GUID_LEN 36
 
-#define STATUS_CODE_OK               1000
-#define STATUS_CODE_GOING_AWAY       1001
-#define STATUS_CODE_PROTOCOL_ERROR   1002
-#define STATUS_CODE_UNSUPPORTED_TYPE 1003
-#define STATUS_CODE_FRAME_TOO_LARGE  1004
-#define STATUS_CODE_OUT_OF_MEMORY    STATUS_CODE_GOING_AWAY
+#define STATUS_CODE_OK                1000
+#define STATUS_CODE_GOING_AWAY        1001
+#define STATUS_CODE_PROTOCOL_ERROR    1002
+#define STATUS_CODE_UNSUPPORTED_TYPE  1003
+#define STATUS_CODE_RESERVED          1004 /* Protocol 8: frame too large */
+#define STATUS_CODE_INVALID_UTF8      1007
+#define STATUS_CODE_POLICY_VIOLATION  1008
+#define STATUS_CODE_MESSAGE_TOO_LARGE 1009
 
 /*
  * Configuration
@@ -98,6 +101,7 @@ static void *mod_websocket_create_dir_config(apr_pool_t *p, char *path)
     conf = apr_pcalloc(p, sizeof(websocket_config_rec));
     if (conf != NULL) {
       conf->location = apr_pstrdup(p, path);
+      conf->payload_limit = 32*1024*1024;
     }
   }
   return (void *)conf;
@@ -159,6 +163,25 @@ static const char *mod_websocket_conf_handler(cmd_parms *cmd, void *confv, const
   return response;
 }
 
+static const char *mod_websocket_conf_max_message_size(cmd_parms *cmd, void *confv, const char *size)
+{
+  websocket_config_rec *conf = (websocket_config_rec *) confv;
+  char *response;
+
+  if ((conf != NULL) && (size != NULL)) {
+    apr_int64_t payload_limit = apr_atoi64(size);
+    if (payload_limit > 0) {
+      conf->payload_limit = payload_limit;
+      response = NULL;
+    } else {
+      response = "Invalid maximum message size";
+    }
+  } else {
+    response = "Invalid parameter";
+  }
+  return response;
+}
+
 /*
  * Functions available to plugins.
  */
@@ -169,6 +192,7 @@ typedef struct _WebSocketState {
   apr_thread_mutex_t *mutex;
   apr_array_header_t *protocols;
   int closing;
+  apr_int64_t protocol_version;
 } WebSocketState;
 
 static request_rec * CALLBACK mod_websocket_request(const struct _WebSocketServer *server)
@@ -236,7 +260,7 @@ static size_t CALLBACK mod_websocket_plugin_send(const struct _WebSocketServer *
   apr_uint64_t payload_length = (apr_uint64_t)((buffer != NULL) ? buffer_size : 0);
   size_t written = 0;
 
-  /* Deal with size more that 63 bits  - FIXME */
+  /* Deal with size more that 63 bits - FIXME */
 
   if ((server != NULL) && (server->state != NULL)) {
     WebSocketState *state = server->state;
@@ -393,7 +417,6 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
 
   if (obb != NULL) {
     unsigned char block[BLOCK_DATA_SIZE];
-    apr_int64_t payload_limit = 32*1024*1024; /* Make this a user configurable setting -- FIXME */
     apr_int64_t block_size;
     apr_int64_t extension_bytes_remaining = 0;
     apr_int64_t payload_length = 0;
@@ -498,10 +521,10 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               payload_length_bytes_remaining--;
             }
             if (payload_length_bytes_remaining == 0) {
-              if ((payload_length < 0) || (payload_length > payload_limit)) {
+              if ((payload_length < 0) || (payload_length > conf->payload_limit)) {
                 /* Invalid payload length */
                 framing_state = DATA_FRAMING_CLOSE;
-                status_code = STATUS_CODE_FRAME_TOO_LARGE; /* Actually message too large -- FIXME */
+                status_code = (state->protocol_version >= 13) ? STATUS_CODE_MESSAGE_TOO_LARGE : STATUS_CODE_RESERVED;
                 break;
               } else if (masking != 0) {
                 framing_state = DATA_FRAMING_MASK;
@@ -536,7 +559,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                 frame->application_data = (unsigned char *) realloc(frame->application_data, frame->application_data_offset + payload_length);
                 if (frame->application_data == NULL) {
                   framing_state = DATA_FRAMING_CLOSE;
-                  status_code = STATUS_CODE_OUT_OF_MEMORY;
+                  status_code = (state->protocol_version >= 13) ? STATUS_CODE_POLICY_VIOLATION : STATUS_CODE_GOING_AWAY;
                   break;
                 }
               }
@@ -610,10 +633,12 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               frame->application_data_offset = application_data_offset;
             }
             break;
+          case DATA_FRAMING_CLOSE:
+            block_offset = block_size;
+            break;
           default:
             framing_state = DATA_FRAMING_CLOSE;
             status_code = STATUS_CODE_PROTOCOL_ERROR;
-            block_offset = block_size;
             break;
         }
       }
@@ -659,20 +684,21 @@ static int mod_websocket_method_handler(request_rec *r)
       const char *host = apr_table_get(r->headers_in, "Host");
       const char *sec_websocket_key = apr_table_get(r->headers_in, "Sec-WebSocket-Key");
       const char *sec_websocket_version = apr_table_get(r->headers_in, "Sec-WebSocket-Version");
+      apr_int64_t protocol_version = (sec_websocket_version != NULL) ? apr_atoi64(sec_websocket_version) : 0;
 
       if ((host != NULL) &&
           (sec_websocket_key != NULL) &&
-          (sec_websocket_version != NULL) &&
-         ((sec_websocket_version[0] == '7') ||  /* Protocol 7 */
-          (sec_websocket_version[0] == '8')) && /* Protocol 8 */
-          (sec_websocket_version[1] == '\0')) {
+         ((protocol_version == 7) ||
+          (protocol_version == 8) ||
+          (protocol_version == 13))) {
         /* const char *sec_websocket_origin = apr_table_get(r->headers_in, "Sec-WebSocket-Origin"); */
-        /* We need to validate the Host and Sec-WebSocket-Origin -- FIXME */
+        /* const char *origin = apr_table_get(r->headers_in, "Origin"); */
+        /* We need to validate the Host and Origin -- FIXME */
 
         websocket_config_rec *conf = (websocket_config_rec *) ap_get_module_config(r->per_dir_config, &websocket_module);
 
         if ((conf != NULL) && (conf->plugin != NULL)) {
-          WebSocketState state = {r, NULL, NULL, NULL, 0};
+          WebSocketState state = {r, NULL, NULL, NULL, 0, protocol_version};
           WebSocketServer server = {
             sizeof(WebSocketServer), 1, &state,
             mod_websocket_request, mod_websocket_header_get, mod_websocket_header_set,
@@ -770,6 +796,8 @@ static const command_rec websocket_cmds[] =
 {
   AP_INIT_TAKE2("WebSocketHandler", mod_websocket_conf_handler, NULL, OR_AUTHCFG,
       "Shared library containing WebSocket implementation followed by function initialization function name"),
+  AP_INIT_TAKE1("MaxMessageSize", mod_websocket_conf_max_message_size, NULL, OR_AUTHCFG,
+      "Maximum size (in bytes) of a message to accept; default is 33554432 bytes (32 MB)"),
   {NULL}
 };
 

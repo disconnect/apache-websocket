@@ -1,22 +1,22 @@
 # apache-websocket
 
-The apache-websocket module is an Apache 2.x module that may be used to process
-requests using the WebSocket protocol. The module consists of a plugin
-architecture for handling WebSocket messaging. Doing so does _not_ require any
-knowledge of internal Apache structures.
+The apache-websocket module is an Apache 2.x server module that may be used to
+process requests using the WebSocket protocol by an Apache 2.x server. The
+module consists of a plugin architecture for handling WebSocket messaging.
+Doing so does _not_ require any knowledge of internal Apache structures.
 
-This implementation supports draft-07 through draft-10, and the older draft-76
-of the WebSocket protocol. Support for draft-75 is disabled by default, but it
-may be enabled through the draft-76 module configuration.
+This implementation supports protocol versions 7, 8, and 13, along with the
+older draft-76 of the WebSocket protocol. Support for draft-75 is disabled by
+default, but it may be enabled through the draft-76 module configuration.
 
 Due to the extensive differences between the newer drafts and draft-76
 implementations, and because of the Apache module architecture, two separate
 modules are used to support the different protocols.
 
 Although draft-76 is technically obsolete, it is the protocol version that is
-currently implemented by the various web browsers. When it is eventually
-supplanted by a newer draft or the official version, simply remove the draft-76
-module and configuration to drop support.
+currently implemented by most of the web browsers. When all of the browsers
+finally move to support the latest protocol, simply remove the draft-76 module
+and configuration to drop support.
 
 ## Download
 
@@ -140,6 +140,20 @@ server will initialize the module by calling the `echo_init` function in
 If your settings are the same between the two modules, you may try to remove
 the `<IfModule mod_websocket_draft76.c>` section of the configuration (you will
 still need the `LoadModule` line if you want to support draft-76).
+
+Since we are dealing with messages, not streams, we need to specify a maximum
+message size. The default size is 32 megabytes. You may override this value by
+specifying a `MaxMessageSize` configuration setting. This option is not
+available for the draft-76 implementation. Here is an example of how to set
+the maximum message size is set to 64 megabytes:
+
+    <IfModule mod_websocket.c>
+      <Location /echo>
+        SetHandler websocket-handler
+        WebSocketHandler /usr/lib/apache2/modules/mod_websocket_echo.so echo_init
+        MaxMessageSize 67108864
+      </Location>
+    </IfModule>
 
 Under Linux, the module-specific configuration may be contained in a single
 file called `/etc/apache2/mods-available/websocket.load` (your version of Linux
