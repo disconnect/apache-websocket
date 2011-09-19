@@ -33,6 +33,7 @@
 #include "http_protocol.h"
 
 #include "websocket_plugin.h"
+#include "validate_utf8.h"
 
 #define CORE_PRIVATE
 #include "http_core.h"
@@ -403,6 +404,7 @@ typedef struct _WebSocketFrameData {
   unsigned char *application_data;
   unsigned char fin;
   unsigned char opcode;
+  unsigned int utf8_state;
 } WebSocketFrameData;
 
 /*
@@ -426,8 +428,8 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
     int mask_index = 0, masking = 0;
     unsigned char mask[4] = {0,0,0,0};
     unsigned char fin = 0, opcode = 0xFF;
-    WebSocketFrameData control_frame = {0, NULL, 1, 8};
-    WebSocketFrameData message_frame = {0, NULL, 1, 0}, *frame = &control_frame;
+    WebSocketFrameData control_frame = {0, NULL, 1, 8, UTF8_VALID};
+    WebSocketFrameData message_frame = {0, NULL, 1, 0, UTF8_VALID}, *frame = &control_frame;
     unsigned short status_code = STATUS_CODE_OK;
     unsigned char status_code_buffer[2];
 
@@ -459,6 +461,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               if (fin) {
                 frame = &control_frame;
                 frame->opcode = opcode;
+                frame->utf8_state = UTF8_VALID;
               } else {
                 framing_state = DATA_FRAMING_CLOSE;
                 status_code = STATUS_CODE_PROTOCOL_ERROR;
@@ -466,10 +469,10 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               }
             } else { /* Message frame */
               frame = &message_frame;
-
               if (opcode) {
                 if (frame->fin) {
                   frame->opcode = opcode;
+                  frame->utf8_state = UTF8_VALID;
                 } else {
                   framing_state = DATA_FRAMING_CLOSE;
                   status_code = STATUS_CODE_PROTOCOL_ERROR;
@@ -482,7 +485,6 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               }
               frame->fin = fin;
             }
-
             payload_length = 0;
             payload_length_bytes_remaining = 0;
 
@@ -579,12 +581,41 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
               if (masking) {
                 apr_int64_t i;
 
-                /* Need to optimize the unmasking -- FIXME */
-                for (i = 0; i < block_data_length; i++) {
-                  application_data[application_data_offset++] = block[block_offset++] ^ mask[mask_offset++ & 3];
+                if (opcode == OPCODE_TEXT) {
+                  unsigned int utf8_state = frame->utf8_state;
+                  unsigned char c;
+
+                  for (i = 0; i < block_data_length; i++) {
+                    c = block[block_offset++] ^ mask[mask_offset++ & 3];
+                    utf8_state = validate_utf8[utf8_state + c];
+                    if (utf8_state == UTF8_INVALID) {
+                      payload_length = block_data_length;
+                      break;
+                    }
+                    application_data[application_data_offset++] = c;
+                  }
+                  frame->utf8_state = utf8_state;
+                } else {
+                  /* Need to optimize the unmasking -- FIXME */
+                  for (i = 0; i < block_data_length; i++) {
+                    application_data[application_data_offset++] = block[block_offset++] ^ mask[mask_offset++ & 3];
+                  }
                 }
               } else if (block_data_length > 0) {
                 memmove(&application_data[application_data_offset], &block[block_offset], block_data_length);
+                if (opcode == OPCODE_TEXT) {
+                  apr_int64_t i, application_data_end = application_data_offset + block_data_length;
+                  unsigned int utf8_state = frame->utf8_state;
+
+                  for (i = application_data_offset; i < application_data_end; i++) {
+                    utf8_state = validate_utf8[utf8_state + application_data[i]];
+                    if (utf8_state == UTF8_INVALID) {
+                      payload_length = block_data_length;
+                      break;
+                    }
+                  }
+                  frame->utf8_state = utf8_state;
+                }
                 application_data_offset += block_data_length;
                 block_offset += block_data_length;
               }
@@ -595,7 +626,13 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
 
                 switch (opcode) {
                   case OPCODE_TEXT:
-                    message_type = MESSAGE_TYPE_TEXT;
+                    if ((fin && (frame->utf8_state != UTF8_VALID)) ||
+                                (frame->utf8_state == UTF8_INVALID)) {
+                      framing_state = DATA_FRAMING_CLOSE;
+                      status_code = STATUS_CODE_INVALID_UTF8;
+                    } else {
+                      message_type = MESSAGE_TYPE_TEXT;
+                    }
                     break;
                   case OPCODE_BINARY:
                     message_type = MESSAGE_TYPE_BINARY;
