@@ -39,6 +39,13 @@
 #include "http_core.h"
 #include "http_connection.h"
 
+#if !defined(APR_ARRAY_IDX)
+#define APR_ARRAY_IDX(ary,i,type) (((type *)(ary)->elts)[i])
+#endif
+#if !defined(APR_ARRAY_PUSH)
+#define APR_ARRAY_PUSH(ary,type) (*((type *)apr_array_push(ary)))
+#endif
+
 module AP_MODULE_DECLARE_DATA websocket_module;
 
 typedef struct {
