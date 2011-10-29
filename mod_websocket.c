@@ -91,7 +91,6 @@ typedef struct {
 #define STATUS_CODE_OK                1000
 #define STATUS_CODE_GOING_AWAY        1001
 #define STATUS_CODE_PROTOCOL_ERROR    1002
-#define STATUS_CODE_UNSUPPORTED_TYPE  1003
 #define STATUS_CODE_RESERVED          1004 /* Protocol 8: frame too large */
 #define STATUS_CODE_INVALID_UTF8      1007
 #define STATUS_CODE_POLICY_VIOLATION  1008
@@ -655,7 +654,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                     break;
                   default:
                     framing_state = DATA_FRAMING_CLOSE;
-                    status_code = STATUS_CODE_UNSUPPORTED_TYPE;
+                    status_code = STATUS_CODE_PROTOCOL_ERROR;
                     break;
                 }
                 if (fin && (message_type != MESSAGE_TYPE_INVALID)) {
@@ -718,11 +717,32 @@ static int mod_websocket_method_handler(request_rec *r)
       (r->method_number == M_GET) && (r->parsed_uri.path != NULL) && (r->headers_in != NULL)) {
     const char *upgrade = apr_table_get(r->headers_in, "Upgrade");
     const char *connection = apr_table_get(r->headers_in, "Connection");
+    int upgrade_connection = 0;
 
     if ((upgrade != NULL) &&
         (connection != NULL) &&
-        !strcasecmp(upgrade, "WebSocket") &&
-        !strcasecmp(connection, "Upgrade")) {
+        !strcasecmp(upgrade, "WebSocket")) {
+      upgrade_connection = !strcasecmp(connection, "Upgrade");
+      if (!upgrade_connection) {
+        char *token = ap_get_token(r->pool, &connection, 0);
+
+        while (token && *token) { /* Parse the Connection value */
+          upgrade_connection = !strcasecmp(token, "Upgrade");
+          if (upgrade_connection) {
+            break;
+          }
+          while (*connection == ';') {
+            ++connection;
+            ap_get_token(r->pool, &connection, 0); /* Skip parameters */
+          }
+          if (*connection++ != ',') {
+            break; /* Invalid without comma */
+          }
+          token = (*connection) ? ap_get_token(r->pool, &connection, 0) : NULL;
+        }
+      }
+    }
+    if (upgrade_connection) {
       /* Need to serialize the connections to minimize a denial of service attack -- FIXME */
 
       const char *host = apr_table_get(r->headers_in, "Host");
