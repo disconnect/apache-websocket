@@ -95,6 +95,7 @@ typedef struct {
 #define STATUS_CODE_INVALID_UTF8      1007
 #define STATUS_CODE_POLICY_VIOLATION  1008
 #define STATUS_CODE_MESSAGE_TOO_LARGE 1009
+#define STATUS_CODE_INTERNAL_ERROR    1011
 
 /*
  * Configuration
@@ -567,7 +568,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                 frame->application_data = (unsigned char *) realloc(frame->application_data, frame->application_data_offset + payload_length);
                 if (frame->application_data == NULL) {
                   framing_state = DATA_FRAMING_CLOSE;
-                  status_code = (state->protocol_version >= 13) ? STATUS_CODE_POLICY_VIOLATION : STATUS_CODE_GOING_AWAY;
+                  status_code = (state->protocol_version >= 13) ? STATUS_CODE_INTERNAL_ERROR : STATUS_CODE_GOING_AWAY;
                   break;
                 }
               }
@@ -608,7 +609,7 @@ static void mod_websocket_data_framing(const struct _WebSocketServer *server, we
                   }
                 }
               } else if (block_data_length > 0) {
-                memmove(&application_data[application_data_offset], &block[block_offset], block_data_length);
+                memcpy(&application_data[application_data_offset], &block[block_offset], block_data_length);
                 if (opcode == OPCODE_TEXT) {
                   apr_int64_t i, application_data_end = application_data_offset + block_data_length;
                   unsigned int utf8_state = frame->utf8_state;

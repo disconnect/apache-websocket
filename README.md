@@ -1,9 +1,10 @@
 # apache-websocket
 
 The apache-websocket module is an Apache 2.x server module that may be used to
-process requests using the WebSocket protocol by an Apache 2.x server. The
-module consists of a plugin architecture for handling WebSocket messaging.
-Doing so does _not_ require any knowledge of internal Apache structures.
+process requests using the WebSocket protocol (RFC 6455) by an Apache 2.x
+server. The module consists of a plugin architecture for handling WebSocket
+messaging. Doing so does _not_ require any knowledge of internal Apache
+structures.
 
 This implementation supports protocol versions 7, 8, and 13, along with the
 older draft-76 of the WebSocket protocol. Support for draft-75 is disabled by
@@ -71,10 +72,14 @@ See `examples/mod_websocket_echo.c` for a simple example implementation of an
 you get a message that says Connection Closed, you are likely using a client
 that does not support these versions of the protocol.
 
-A more extensive example may now be found in
+A more extensive example may be found in
 `examples/mod_websocket_dumb_increment.c`. That plugin implements the
 dumb-increment-protocol (see libwebsockets by Andy Green for more information
-on the protocol).
+on the protocol). There is a test client for testing the module in
+`increment.html`. It uses the WebSocket client API which supports passing
+supported protocols in the WebSocket constructor. If your browser does not
+support this, either upgrade your browser or modify the plugin so that it
+doesn't verify the protocol.
 
 If you provide an `on_connect` function, return a non-null value to accept the
 connection, and null if you wish to decline the connection. The return value
@@ -161,8 +166,8 @@ may vary). If you did not use `apxs2` with the `-a` option to initially
 create the module, you will have to make a link between
 `/etc/apache2/mods-enabled/websocket.load` and
 `/etc/apache2/mods-available/websocket.load`. Take a look at the already enabled
-modules to see how it should look.  Since the directory containing the
-module is different from Mac OS X, the configuration will look more like this:
+modules to see how it should look. Since the directory containing the module is
+different from Mac OS X, the configuration will look more like this:
 
     LoadModule websocket_module   /usr/lib/apache2/modules/mod_websocket.so
     LoadModule websocket_draft76_module   /usr/lib/apache2/modules/mod_websocket_draft76.so
