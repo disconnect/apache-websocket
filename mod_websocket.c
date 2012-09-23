@@ -462,19 +462,10 @@ typedef struct _WebSocketFrameData
     unsigned int utf8_state;
 } WebSocketFrameData;
 
-/*
- * The data framing handler requires that the server state mutex is locked by
- * the caller upon entering this function. It will be locked when leaving too.
- */
-static void mod_websocket_data_framing(const WebSocketServer *server,
-                                       websocket_config_rec *conf,
-                                       void *plugin_private)
+static apr_bucket_brigade* mod_websocket_get_bucket_brigade(apr_pool_t *ppool)
 {
-    WebSocketState *state = server->state;
-    request_rec *r = state->r;
-    apr_pool_t *pool = NULL;
-    apr_bucket_alloc_t *bucket_alloc;
-    apr_bucket_brigade *obb;
+    apr_allocator_t *allocator = NULL;
+    apr_bucket_brigade* bb = NULL;
 
     /* We cannot use the same bucket allocator for the ouput bucket brigade
      * obb as the one associated with the connection (r->connection->bucket_alloc)
@@ -485,9 +476,38 @@ static void mod_websocket_data_framing(const WebSocketServer *server,
      * for output thread bucket brigade. (Thanks to Alex Bligh -- abligh)
      */
 
-    if ((apr_pool_create(&pool, r->pool) == APR_SUCCESS) &&
-        ((bucket_alloc = apr_bucket_alloc_create(pool)) != NULL) &&
-        ((obb = apr_brigade_create(pool, bucket_alloc)) != NULL)) {
+    if (apr_allocator_create(&allocator) == APR_SUCCESS) {
+        apr_pool_t *pool = NULL;
+
+        apr_allocator_max_free_set(allocator, 1024*1024);
+        if (apr_pool_create_ex(&pool, ppool, NULL, allocator) == APR_SUCCESS) {
+            apr_bucket_alloc_t *bucket_alloc;
+
+            apr_allocator_owner_set(allocator, pool);
+            if ((bucket_alloc = apr_bucket_alloc_create(pool)) != NULL) {
+                bb = apr_brigade_create(pool, bucket_alloc);
+            }
+        }
+        else {
+            apr_allocator_destroy(allocator);
+        }
+    }
+    return bb;
+}
+
+/*
+ * The data framing handler requires that the server state mutex is locked by
+ * the caller upon entering this function. It will be locked when leaving too.
+ */
+static void mod_websocket_data_framing(const WebSocketServer *server,
+                                       websocket_config_rec *conf,
+                                       void *plugin_private)
+{
+    WebSocketState *state = server->state;
+    request_rec *r = state->r;
+    apr_bucket_brigade *obb = mod_websocket_get_bucket_brigade(r->pool);
+
+    if (obb != NULL) {
         unsigned char block[BLOCK_DATA_SIZE];
         apr_int64_t block_size;
         apr_int64_t extension_bytes_remaining = 0;
@@ -944,7 +964,7 @@ static int mod_websocket_method_handler(request_rec *r)
                     }
 
                     apr_thread_mutex_create(&state.mutex,
-                                            APR_THREAD_MUTEX_DEFAULT,
+                                            APR_THREAD_MUTEX_UNNESTED,
                                             r->pool);
                     apr_thread_mutex_lock(state.mutex);
 

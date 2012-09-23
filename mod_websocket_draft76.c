@@ -427,6 +427,39 @@ static int mod_websocket_handshake(const char *key1, const char *key2, const cha
     return status;
 }
 
+static apr_bucket_brigade* mod_websocket_get_bucket_brigade(apr_pool_t *ppool)
+{
+    apr_allocator_t *allocator = NULL;
+    apr_bucket_brigade* bb = NULL;
+
+    /* We cannot use the same bucket allocator for the ouput bucket brigade
+     * obb as the one associated with the connection (r->connection->bucket_alloc)
+     * because the same bucket allocator cannot be used in two different
+     * threads, and we use the connection bucket allocator in this
+     * thread - see docs on apr_bucket_alloc_create(). This results in
+     * occasional core dumps. So create our own bucket allocator and pool
+     * for output thread bucket brigade. (Thanks to Alex Bligh -- abligh)
+     */
+
+    if (apr_allocator_create(&allocator) == APR_SUCCESS) {
+        apr_pool_t *pool = NULL;
+
+        apr_allocator_max_free_set(allocator, 1024*1024);
+        if (apr_pool_create_ex(&pool, ppool, NULL, allocator) == APR_SUCCESS) {
+            apr_bucket_alloc_t *bucket_alloc;
+
+            apr_allocator_owner_set(allocator, pool);
+            if ((bucket_alloc = apr_bucket_alloc_create(pool)) != NULL) {
+                bb = apr_brigade_create(pool, bucket_alloc);
+            }
+        }
+        else {
+            apr_allocator_destroy(allocator);
+        }
+    }
+    return bb;
+}
+
 /*
  * This is the WebSocket request handler. Since WebSocket headers are quite
  * similar to HTTP headers, we will use most of the HTTP protocol handling
@@ -535,9 +568,7 @@ static int mod_websocket_method_handler(request_rec *r)
                                 /* If the plugin supplies an on_connect function, it must return non-null on success */
                                 if ((conf->plugin->on_connect == NULL) ||
                                     ((plugin_private = conf->plugin->on_connect(&server)) != NULL)) {
-                                    apr_pool_t *pool = NULL;
-                                    apr_bucket_alloc_t *bucket_alloc;
-                                    apr_bucket_brigade *obb;
+                                    apr_bucket_brigade *obb = mod_websocket_get_bucket_brigade(r->pool);
 
                                     /* Now that the connection has been established, disable the socket timeout */
                                     apr_socket_timeout_set(ap_get_module_config(r->connection->conn_config, &core_module), -1);
@@ -550,9 +581,7 @@ static int mod_websocket_method_handler(request_rec *r)
                                     ap_send_interim_response(r, 1);
 
                                     /* Create the output bucket brigade */
-                                    if ((apr_pool_create(&pool, r->pool) == APR_SUCCESS) &&
-                                        ((bucket_alloc = apr_bucket_alloc_create(pool)) != NULL) &&
-                                        ((obb = apr_brigade_create(pool, bucket_alloc)) != NULL)) {
+                                    if (obb != NULL) {
                                         unsigned char block[BLOCK_DATA_SIZE], *extended_data = NULL;
                                         apr_off_t extended_data_offset = 0;
                                         apr_size_t block_size, data_length = 0, extended_data_size = 0;
