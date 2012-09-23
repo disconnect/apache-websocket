@@ -535,6 +535,8 @@ static int mod_websocket_method_handler(request_rec *r)
                                 /* If the plugin supplies an on_connect function, it must return non-null on success */
                                 if ((conf->plugin->on_connect == NULL) ||
                                     ((plugin_private = conf->plugin->on_connect(&server)) != NULL)) {
+                                    apr_pool_t *pool = NULL;
+                                    apr_bucket_alloc_t *bucket_alloc;
                                     apr_bucket_brigade *obb;
 
                                     /* Now that the connection has been established, disable the socket timeout */
@@ -548,9 +550,9 @@ static int mod_websocket_method_handler(request_rec *r)
                                     ap_send_interim_response(r, 1);
 
                                     /* Create the output bucket brigade */
-                                    obb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-
-                                    if (obb != NULL) {
+                                    if ((apr_pool_create(&pool, r->pool) == APR_SUCCESS) &&
+                                        ((bucket_alloc = apr_bucket_alloc_create(pool)) != NULL) &&
+                                        ((obb = apr_brigade_create(pool, bucket_alloc)) != NULL)) {
                                         unsigned char block[BLOCK_DATA_SIZE], *extended_data = NULL;
                                         apr_off_t extended_data_offset = 0;
                                         apr_size_t block_size, data_length = 0, extended_data_size = 0;
