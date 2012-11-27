@@ -197,6 +197,10 @@ static const char *mod_websocket_conf_proxy(cmd_parms *cmd, void *confv,
     if ((conf != NULL) && (proxy_url != NULL) &&
         (apr_uri_parse(cmd->pool, proxy_url, &conf->proxy_url) == APR_SUCCESS) &&
         (strcmp(conf->proxy_url.scheme, "ws") == 0)) { /* Only support "ws" for now */
+        if ((conf->proxy_url.path == NULL) ||
+            (conf->proxy_url.path[0] == '\0')) {
+            conf->proxy_url.path = apr_pstrdup(cmd->pool, "/");
+        }
         response = NULL;
     }
     else {
@@ -572,6 +576,7 @@ static void mod_websocket_proxy_handler(websocket_config_rec *conf,
     apr_sockaddr_t *sa = NULL;
 
     const char *hostname = conf->proxy_url.hostname;
+    const char *path = conf->proxy_url.path;
     const apr_port_t port = conf->proxy_url.port;
 
     if ((apr_socket_create(&server_sock, AF_INET, SOCK_STREAM, 0,
@@ -582,18 +587,20 @@ static void mod_websocket_proxy_handler(websocket_config_rec *conf,
         char buffer[BLOCK_DATA_SIZE];
         const apr_array_header_t *arr = apr_table_elts(r->headers_in);
         const apr_table_entry_t *header = (const apr_table_entry_t *)arr->elts;
-        apr_size_t size = strlen(r->method) + strlen(r->protocol) + 8;
+        apr_size_t size = strlen(r->method) + strlen(path) + strlen(r->protocol) + 7;
         int j;
 
         for (j = 0; j < arr->nelts; j++) {
           size += strlen(header[j].key) + strlen(header[j].val) + 4;
         }
         if (size <= BLOCK_DATA_SIZE) {
-            apr_size_t offset = sprintf(buffer, "%s %s %s\r\n", r->method, "/", r->protocol);
+            apr_size_t offset = sprintf(buffer, "%s %s %s\r\n",
+                                        r->method, path, r->protocol);
 
             if (header != NULL) {
                 for (j = 0; j < arr->nelts; j++) {
-                    offset += sprintf(buffer + offset,"%s: %s\r\n", header[j].key, header[j].val);
+                    offset += sprintf(buffer + offset,"%s: %s\r\n",
+                                      header[j].key, header[j].val);
                 }
             }
             offset += sprintf(buffer + offset,"\r\n");
@@ -1171,6 +1178,7 @@ static int mod_websocket_method_handler(request_rec *r)
                 }
                 else if ((conf != NULL) &&
                          (conf->proxy_url.hostname != NULL) &&
+                         (conf->proxy_url.path != NULL) &&
                          (conf->proxy_url.port != 0)) {
                     mod_websocket_proxy_handler(conf, r);
 
